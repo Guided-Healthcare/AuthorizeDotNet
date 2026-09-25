@@ -166,7 +166,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="responseString" from="org.moqui.util.WebUtilities.simpleHttpStringRequest(pgan.transactionUrl, requestString, 'text/xml')"/>
             <log message="store#CustomerPaymentMethod responseString: \n${responseString}"/>
 
-            <set field="responseNode" from="new XmlParser().parseText(responseString)"/>
+            <set field="responseNode" from="new groovy.xml.XmlParser().parseText(responseString)"/>
 
             <!-- save a PaymentGatewayResponse for the validation auth, if there is one -->
             <if condition="responseNode.validationDirectResponseList?.string">
@@ -254,7 +254,7 @@ along with this software (see the LICENSE.md file). If not, see
 
                 <set field="responseString" from="org.moqui.util.WebUtilities.simpleHttpStringRequest(pgan.transactionUrl, requestString, 'text/xml')"/>
                 <log level="info" message="delete#CustomerPaymentMethod responseString: \n${responseString}"/>
-                <set field="responseNode" from="new XmlParser().parseText(responseString)"/>
+                <set field="responseNode" from="new groovy.xml.XmlParser().parseText(responseString)"/>
 
                 <if condition="responseNode.messages">
                     <set field="responseCode" from="responseNode.messages[0].resultCode[0]?.text()"/>

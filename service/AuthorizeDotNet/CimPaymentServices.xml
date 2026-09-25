@@ -388,7 +388,7 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- do the HTTP request -->
             <set field="responseString" from="org.moqui.util.WebUtilities.simpleHttpStringRequest(transactionUrl, requestString, 'text/xml')"/>
             <log message="CimPaymentServices payment ${payment?.paymentId} ${paymentOperationEnumId} responseString: \n${responseString}"/>
-            <set field="responseNode" from="new XmlParser().parseText(responseString)"/>
+            <set field="responseNode" from="new groovy.xml.XmlParser().parseText(responseString)"/>
 
             <if condition="responseNode.messages">
                 <set field="responseCode" from="responseNode.messages[0].resultCode[0]?.text()"/>
