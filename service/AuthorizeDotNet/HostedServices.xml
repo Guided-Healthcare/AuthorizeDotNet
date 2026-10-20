@@ -254,24 +254,33 @@ along with this software (see the LICENSE.md file). If not, see
 </getTransactionDetailsRequest>
             """]]></script>
             <set field="responseString" from="org.moqui.util.WebUtilities.simpleHttpStringRequest(pgan.transactionUrl, requestString, 'text/xml')"/>
-            <set field="responseNode" from="new groovy.xml.XmlParser().parseText(responseString)"/>
-            <set field="responseCode" from="responseNode.messages[0]?.resultCode[0]?.text()"/>
-            <if condition="!'Ok'.equalsIgnoreCase(responseCode ?: '')">
-                <log level="warn" message="getTransactionDetails failed for order ${orderId} trans ${transId}"/>
+            <script><![CDATA[
+                def responseNode = new groovy.xml.XmlParser().parseText(responseString)
+                def rc = responseNode.messages?.resultCode?.text()
+                authorized = false
+                txnOk = false
+                returnedCustomerProfileId = null
+                responseReason = null
+                if ('Ok'.equalsIgnoreCase(rc ?: '')) {
+                    def txn = responseNode.transaction
+                    if (txn != null && txn.size() > 0) {
+                        def txnStatus = txn.transactionStatus.text()
+                        responseReason = txn.responseCode.text()
+                        txnOk = true
+                        authorized = (responseReason == '1') &&
+                            (['authorizedPendingCapture','capturedPendingSettlement','settledSuccessfully'].contains(txnStatus))
+                        def prof = txn.profile
+                        if (prof != null && prof.size() > 0) returnedCustomerProfileId = prof.customerProfileId.text()
+                    }
+                }
+            ]]></script>
+            <if condition="!txnOk">
+                <log level="warn" message="getTransactionDetails failed/empty for order ${orderId} trans ${transId}"/>
                 <return/>
             </if>
-
-            <set field="txn" from="responseNode.transaction[0]"/>
-            <set field="txnStatus" from="txn?.transactionStatus[0]?.text()"/>
-            <set field="responseReason" from="txn?.responseCode[0]?.text()"/>
-            <!-- responseCode 1 = approved; these statuses mean authorized/captured. -->
-            <set field="authorized" from="(responseReason == '1') &amp;&amp;
-                    (txnStatus in ['authorizedPendingCapture','capturedPendingSettlement','settledSuccessfully'])"/>
             <if condition="!authorized"><return/></if>
 
             <!-- Bind any newly created CIM customer/payment profile ids to the party. -->
-            <set field="profile" from="txn?.profile[0]"/>
-            <set field="returnedCustomerProfileId" from="profile?.customerProfileId[0]?.text()"/>
             <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart">
                 <field-map field-name="orderId"/><field-map field-name="orderPartSeqId"/>
             </entity-find-one>
