@@ -49,13 +49,18 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="AuthorizeDotNet.PaymentGatewayAuthorizeNet" value-field="pgan"/>
             <if condition="pgan == null"><return error="true" message="Gateway ${paymentGatewayConfigId} not found."/></if>
 
-            <set field="emailContactMech" from="party.'Email#mantle.party.contact.ContactMech'"/>
+            <!-- Email is optional on createCustomerProfile. Resolve it via the party's primary email
+                 contact mech (the 'Email#...ContactMech' relationship exists on PaymentMethod, NOT
+                 on Party, so look it up through ContactServices instead). -->
+            <service-call name="mantle.party.ContactServices.get#PartyContactInfo" out-map="partyContact"
+                    in-map="[partyId:partyId, emailContactMechPurposeId:'EmailPrimary']"/>
+            <set field="emailAddress" from="partyContact?.emailAddress ?: ''"/>
             <script><![CDATA[requestString = """<?xml version="1.0" encoding="utf-8"?>
 <createCustomerProfileRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
     <merchantAuthentication><name>${pgan.login}</name><transactionKey>${pgan.tranKey}</transactionKey></merchantAuthentication>
     <profile>
         <merchantCustomerId>${party.partyId}_${getRandomString(5)}</merchantCustomerId>
-        <email>${emailContactMech?.infoString ?: ''}</email>
+        <email>${emailAddress}</email>
     </profile>
 </createCustomerProfileRequest>
             """]]></script>
