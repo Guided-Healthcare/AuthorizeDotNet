@@ -124,8 +124,9 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- hostedProfileSettings setting names differ from the payment-page method.
                  hostedProfileIFrameCommunicatorUrl (NOT hostedPayment*) is required so the page
-                 posts cancel/success/resize messages back and closes after vaulting. -->
-            <set field="iframeJson" from="'{&quot;url&quot;:&quot;' + iframeCommunicatorUrl + '&quot;}'"/>
+                 posts cancel/success/resize messages back and closes after vaulting. Unlike the
+                 payment page (which takes a JSON {"url":...} value), the PROFILE page expects the
+                 communicator URL as a plain URL string. -->
             <script><![CDATA[requestString = """<?xml version="1.0" encoding="utf-8"?>
 <getHostedProfilePageRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
     <merchantAuthentication><name>${pgan.login}</name><transactionKey>${pgan.tranKey}</transactionKey></merchantAuthentication>
@@ -134,7 +135,7 @@ along with this software (see the LICENSE.md file). If not, see
         <setting><settingName>hostedProfilePageBorderVisible</settingName><settingValue>false</settingValue></setting>
         <setting><settingName>hostedProfileValidationMode</settingName><settingValue>${pgan.validationMode == 'none' ? 'testMode' : pgan.validationMode}</settingValue></setting>
         <setting><settingName>hostedProfileManageOptions</settingName><settingValue>showPayment</settingValue></setting>
-        <setting><settingName>hostedProfileIFrameCommunicatorUrl</settingName><settingValue>${iframeJson}</settingValue></setting>
+        <setting><settingName>hostedProfileIFrameCommunicatorUrl</settingName><settingValue>${iframeCommunicatorUrl}</settingValue></setting>
     </hostedProfileSettings>
 </getHostedProfilePageRequest>
             """]]></script>
