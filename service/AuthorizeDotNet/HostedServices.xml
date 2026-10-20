@@ -195,7 +195,9 @@ along with this software (see the LICENSE.md file). If not, see
         <in-parameters>
             <parameter name="orderId" required="true"/>
             <parameter name="orderPartSeqId" default-value="01"/>
-            <parameter name="transId" required="true"/>
+            <parameter name="transId"><description>Optional. The hosted iframe transactResponse
+                callback is unreliable in nested iframes, so when omitted we look up the transaction
+                by our orderId (invoiceNumber) in the unsettled transaction list.</description></parameter>
             <parameter name="paymentGatewayConfigId"/>
         </in-parameters>
         <out-parameters>
@@ -218,6 +220,32 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
             <entity-find-one entity-name="AuthorizeDotNet.PaymentGatewayAuthorizeNet" value-field="pgan"/>
             <if condition="pgan == null"><return error="true" message="Gateway ${paymentGatewayConfigId} not found."/></if>
+
+            <!-- Reliable path: no transId from the unreliable iframe callback. Find our transaction
+                 by invoiceNumber (== orderId) in the unsettled transaction list. A fresh
+                 auth-capture is unsettled until the nightly batch, so it will be present here. -->
+            <if condition="!transId">
+                <script><![CDATA[listRequest = """<?xml version="1.0" encoding="utf-8"?>
+<getUnsettledTransactionListRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
+    <merchantAuthentication><name>${pgan.login}</name><transactionKey>${pgan.tranKey}</transactionKey></merchantAuthentication>
+    <sorting><orderBy>submitTimeUTC</orderBy><orderDescending>true</orderDescending></sorting>
+    <paging><limit>100</limit><offset>1</offset></paging>
+</getUnsettledTransactionListRequest>
+                """]]></script>
+                <set field="listResp" from="org.moqui.util.WebUtilities.simpleHttpStringRequest(pgan.transactionUrl, listRequest, 'text/xml')"/>
+                <set field="listNode" from="new groovy.xml.XmlParser().parseText(listResp)"/>
+                <if condition="'Ok'.equalsIgnoreCase(listNode.messages[0]?.resultCode[0]?.text() ?: '')">
+                    <iterate list="listNode.transactions[0]?.transaction ?: []" entry="t">
+                        <if condition="!transId &amp;&amp; (t.invoiceNumber[0]?.text() == orderId)">
+                            <set field="transId" from="t.transId[0]?.text()"/>
+                        </if>
+                    </iterate>
+                </if>
+                <if condition="!transId">
+                    <log level="info" message="confirm#HostedTransaction: no unsettled transaction yet for order ${orderId}"/>
+                    <return/><!-- not charged yet; caller polls again -->
+                </if>
+            </if>
 
             <script><![CDATA[requestString = """<?xml version="1.0" encoding="utf-8"?>
 <getTransactionDetailsRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
