@@ -295,45 +295,60 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
             </if>
 
-            <!-- Record/approve the Mantle Payment for the order so downstream status is authoritative. -->
+            <!-- Record the Mantle Payment for the order. Use mantle's create#Payment, which creates
+                 at PmntPromised and legally jumps to the target (PmntPromised->PmntDelivered is an
+                 allowed StatusFlowTransition; the raw-create-at-Proposed path I used before is not).
+                 PmntDelivered is in the accepted-complete set the reconciliation honors and reflects
+                 the auth-and-captured charge. Idempotent: reuse an existing non-cancelled Payment. -->
             <entity-find entity-name="mantle.account.payment.Payment" list="payments">
                 <econdition field-name="orderId"/>
                 <econdition field-name="orderPartSeqId"/>
+                <econdition field-name="statusId" operator="not-in" value="PmntCancelled,PmntVoid,PmntDeclined"/>
                 <order-by field-name="paymentId"/>
             </entity-find>
+            <set field="vendorPartyId" from="null"/>
+            <if condition="orderHeader.productStoreId">
+                <entity-find-one entity-name="mantle.product.store.ProductStore" value-field="prodStore">
+                    <field-map field-name="productStoreId" from="orderHeader.productStoreId"/>
+                </entity-find-one>
+                <set field="vendorPartyId" from="prodStore?.organizationPartyId"/>
+            </if>
             <if condition="payments"><then>
                 <set field="pmt" from="payments[0]"/>
-            </then><else>
-                <service-call name="create#mantle.account.payment.Payment" out-map="createPmtOut"
-                        in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId,
-                                 paymentTypeEnumId:'PtInvoicePayment', statusId:'PmntProposed',
-                                 amount:orderHeader.grandTotal, amountUomId:orderHeader.currencyUomId,
-                                 fromPartyId:customerPartyId,
-                                 paymentGatewayConfigId:paymentGatewayConfigId]"/>
-                <entity-find-one entity-name="mantle.account.payment.Payment" value-field="pmt">
-                    <field-map field-name="paymentId" from="createPmtOut.paymentId"/>
-                </entity-find-one>
-            </else></if>
-            <if condition="pmt != null">
-                <!-- Move the Payment to PmntAuthorized (legal transition from PmntProposed; the
-                     Proposed->Delivered jump is rejected by Mantle's status state machine).
-                     PmntAuthorized is in the accepted-complete set the reconciliation honors, and
-                     accurately reflects the auth-and-captured charge. Guard so repeated polls don't
-                     re-attempt an illegal transition once already advanced. -->
-                <if condition="pmt.statusId == 'PmntProposed'">
+                <!-- Advance an existing payment to Delivered if not already in an accepted status. -->
+                <if condition="!(pmt.statusId in ['PmntAuthorized','PmntDelivered','PmntConfirmed'])">
                     <service-call name="update#mantle.account.payment.Payment"
-                            in-map="[paymentId:pmt.paymentId, statusId:'PmntAuthorized',
-                                     paymentRefNum:transId, paymentGatewayConfigId:paymentGatewayConfigId]"/>
+                            in-map="[paymentId:pmt.paymentId, statusId:'PmntDelivered', paymentRefNum:transId,
+                                     effectiveDate:ec.user.nowTimestamp, paymentGatewayConfigId:paymentGatewayConfigId]"/>
+                </if>
+                <set field="paidPaymentId" from="pmt.paymentId"/>
+            </then><else>
+                <service-call name="mantle.account.PaymentServices.create#Payment" out-map="createPmtOut"
+                        in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId,
+                                 paymentTypeEnumId:'PtInvoicePayment', statusId:'PmntDelivered',
+                                 amount:orderHeader.grandTotal, amountUomId:orderHeader.currencyUomId,
+                                 fromPartyId:customerPartyId, toPartyId:vendorPartyId,
+                                 paymentRefNum:transId, effectiveDate:ec.user.nowTimestamp,
+                                 paymentGatewayConfigId:paymentGatewayConfigId]"/>
+                <set field="paidPaymentId" from="createPmtOut.paymentId"/>
+            </else></if>
+            <if condition="paidPaymentId">
+                <!-- Record a gateway response once (skip if one already exists for this transId). -->
+                <entity-find entity-name="mantle.account.method.PaymentGatewayResponse" list="existingPgr">
+                    <econdition field-name="paymentId" from="paidPaymentId"/>
+                    <econdition field-name="referenceNum" from="transId"/>
+                </entity-find>
+                <if condition="!existingPgr">
                     <service-call name="create#mantle.account.method.PaymentGatewayResponse"
                             in-map="[paymentGatewayConfigId:paymentGatewayConfigId, paymentOperationEnumId:'PgoAuthAndCapture',
-                                     paymentId:pmt.paymentId, amountUomId:orderHeader.currencyUomId,
+                                     paymentId:paidPaymentId, amountUomId:orderHeader.currencyUomId,
                                      amount:orderHeader.grandTotal, referenceNum:transId,
                                      transactionDate:ec.user.nowTimestamp, resultSuccess:'Y', resultError:'N',
                                      responseCode:responseReason]"/>
                 </if>
-                <set field="paymentId" from="pmt.paymentId"/>
+                <set field="paymentId" from="paidPaymentId"/>
                 <entity-find-one entity-name="mantle.account.payment.Payment" value-field="pmtNow">
-                    <field-map field-name="paymentId" from="pmt.paymentId"/>
+                    <field-map field-name="paymentId" from="paidPaymentId"/>
                 </entity-find-one>
                 <set field="paymentStatusId" from="pmtNow?.statusId"/>
             </if>
