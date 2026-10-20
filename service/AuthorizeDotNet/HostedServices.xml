@@ -225,22 +225,22 @@ along with this software (see the LICENSE.md file). If not, see
                  by invoiceNumber (== orderId) in the unsettled transaction list. A fresh
                  auth-capture is unsettled until the nightly batch, so it will be present here. -->
             <if condition="!transId">
-                <script><![CDATA[listRequest = """<?xml version="1.0" encoding="utf-8"?>
+                <script><![CDATA[
+                    def listRequest = """<?xml version="1.0" encoding="utf-8"?>
 <getUnsettledTransactionListRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
     <merchantAuthentication><name>${pgan.login}</name><transactionKey>${pgan.tranKey}</transactionKey></merchantAuthentication>
     <sorting><orderBy>submitTimeUTC</orderBy><orderDescending>true</orderDescending></sorting>
     <paging><limit>100</limit><offset>1</offset></paging>
-</getUnsettledTransactionListRequest>
-                """]]></script>
-                <set field="listResp" from="org.moqui.util.WebUtilities.simpleHttpStringRequest(pgan.transactionUrl, listRequest, 'text/xml')"/>
-                <set field="listNode" from="new groovy.xml.XmlParser().parseText(listResp)"/>
-                <if condition="'Ok'.equalsIgnoreCase(listNode.messages[0]?.resultCode[0]?.text() ?: '')">
-                    <iterate list="listNode.transactions[0]?.transaction ?: []" entry="t">
-                        <if condition="!transId &amp;&amp; (t.invoiceNumber[0]?.text() == orderId)">
-                            <set field="transId" from="t.transId[0]?.text()"/>
-                        </if>
-                    </iterate>
-                </if>
+</getUnsettledTransactionListRequest>"""
+                    def listResp = org.moqui.util.WebUtilities.simpleHttpStringRequest(pgan.transactionUrl, listRequest, 'text/xml')
+                    def listNode = new groovy.xml.XmlParser().parseText(listResp)
+                    def resultCode = listNode.messages?.resultCode?.text()
+                    if ('Ok'.equalsIgnoreCase(resultCode ?: '')) {
+                        // transactions.transaction is a NodeList; find ours by invoiceNumber == orderId.
+                        def match = listNode.transactions.transaction.find { it.invoiceNumber.text() == orderId.toString() }
+                        if (match != null) transId = match.transId.text()
+                    }
+                ]]></script>
                 <if condition="!transId">
                     <log level="info" message="confirm#HostedTransaction: no unsettled transaction yet for order ${orderId}"/>
                     <return/><!-- not charged yet; caller polls again -->
