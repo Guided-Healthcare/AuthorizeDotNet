@@ -1,0 +1,243 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+This software is in the public domain under CC0 1.0 Universal plus a
+Grant of Patent License.
+
+To the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the
+public domain worldwide. This software is distributed without any
+warranty.
+
+You should have received a copy of the CC0 Public Domain Dedication
+along with this software (see the LICENSE.md file). If not, see
+<http://creativecommons.org/publicdomain/zero/1.0/>.
+-->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <!-- Authorize.Net Accept Hosted - CIM profile vaulting (getHostedProfilePage). See:
+         https://developer.authorize.net/api/reference/#customer-profiles-get-customer-profile
+
+         Design (vault-then-charge): the hosted profile page ONLY captures and vaults the card into
+         the party's Authorize.Net CIM profile - it runs no transaction. The browser POSTs the token
+         to Authorize.Net's /customer/addPayment page; PAN/CVV never reach this application. After the
+         card is vaulted we sync it into a Mantle PaymentMethod and hand its paymentMethodId to the
+         existing, production-proven uniquelyme.CartServices.checkout#Cart saved-card path, which
+         performs the auth-and-capture via the existing CIM authorize#Payment service.
+
+         This keeps all money-handling on the already-proven authorization code and adds no novel
+         payment-reconciliation logic. -->
+
+    <!-- Ensure the party has an Authorize.Net CIM customer profile (empty is fine). Returns the
+         customerProfileId (the party's gatewayCimId). getHostedProfilePage REQUIRES a pre-existing
+         customer profile id, so this runs first for parties that have never vaulted a card. -->
+    <service verb="ensure" noun="CustomerProfile">
+        <in-parameters>
+            <parameter name="partyId" required="true"/>
+            <parameter name="paymentGatewayConfigId" required="true"/>
+        </in-parameters>
+        <out-parameters><parameter name="customerProfileId"/></out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.party.Party" value-field="party" for-update="true">
+                <field-map field-name="partyId"/>
+            </entity-find-one>
+            <if condition="party == null"><return error="true" message="Party ${partyId} not found."/></if>
+            <if condition="party.gatewayCimId">
+                <set field="customerProfileId" from="party.gatewayCimId"/>
+                <return/>
+            </if>
+
+            <entity-find-one entity-name="AuthorizeDotNet.PaymentGatewayAuthorizeNet" value-field="pgan"/>
+            <if condition="pgan == null"><return error="true" message="Gateway ${paymentGatewayConfigId} not found."/></if>
+
+            <set field="emailContactMech" from="party.'Email#mantle.party.contact.ContactMech'"/>
+            <script><![CDATA[requestString = """<?xml version="1.0" encoding="utf-8"?>
+<createCustomerProfileRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
+    <merchantAuthentication><name>${pgan.login}</name><transactionKey>${pgan.tranKey}</transactionKey></merchantAuthentication>
+    <profile>
+        <merchantCustomerId>${party.partyId}_${getRandomString(5)}</merchantCustomerId>
+        <email>${emailContactMech?.infoString ?: ''}</email>
+    </profile>
+</createCustomerProfileRequest>
+            """]]></script>
+            <!-- NOTE: never log requestString; it contains merchant credentials. -->
+            <set field="responseString" from="org.moqui.util.WebUtilities.simpleHttpStringRequest(pgan.transactionUrl, requestString, 'text/xml')"/>
+            <set field="responseNode" from="new groovy.xml.XmlParser().parseText(responseString)"/>
+            <set field="responseCode" from="responseNode.messages[0]?.resultCode[0]?.text()"/>
+
+            <if condition="!'Ok'.equalsIgnoreCase(responseCode ?: '')">
+                <!-- A duplicate-profile error (E00039) carries the existing profile id in the text. -->
+                <set field="dupId" from="responseNode.messages[0]?.message[0]?.text[0]?.text()?.replaceAll(/\D/, '')"/>
+                <if condition="dupId"><then>
+                    <set field="customerProfileId" from="dupId"/>
+                </then><else>
+                    <log level="warn" message="createCustomerProfile failed for party ${partyId}: ${responseString}"/>
+                    <return error="true" type="danger" message="Could not initialize payment profile."/>
+                </else></if>
+            </if>
+            <if condition="!customerProfileId">
+                <set field="customerProfileId" from="responseNode.customerProfileId[0]?.text()"/>
+            </if>
+            <if condition="!customerProfileId"><return error="true" type="danger"
+                    message="Could not initialize payment profile (no id)."/></if>
+
+            <set field="party.gatewayCimId" from="customerProfileId"/>
+            <entity-update value-field="party"/>
+        </actions>
+    </service>
+
+    <!-- Mint a one-time Accept Hosted PROFILE page token. The hosted page lets the customer enter a
+         card which Authorize.Net vaults as a payment profile under the party's customer profile.
+         No transaction is run here. -->
+    <service verb="mint" noun="HostedProfileToken">
+        <in-parameters>
+            <parameter name="partyId" required="true"/>
+            <parameter name="paymentGatewayConfigId"/>
+            <parameter name="iframeCommunicatorUrl" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="formToken"/>
+            <parameter name="customerProfileId"/>
+        </out-parameters>
+        <actions>
+            <service-call name="AuthorizeDotNet.CimServices.get#PaymentGatewayConfig"
+                    in-map="[paymentGatewayConfigId:paymentGatewayConfigId]" out-map="gwOut"/>
+            <set field="paymentGatewayConfigId" from="gwOut.paymentGatewayConfigId ?: paymentGatewayConfigId"/>
+            <if condition="!paymentGatewayConfigId">
+                <set field="paymentGatewayConfigId" from="ec.user.getPreference('AuthorizeNetCimPaymentGatewayConfigId')"/>
+            </if>
+            <if condition="!paymentGatewayConfigId"><return error="true" type="danger"
+                    message="No Authorize.Net payment gateway configured."/></if>
+
+            <service-call name="AuthorizeDotNet.HostedServices.ensure#CustomerProfile"
+                    in-map="[partyId:partyId, paymentGatewayConfigId:paymentGatewayConfigId]" out-map="ensureOut"/>
+            <if condition="ec.message.hasError()"><return/></if>
+            <set field="customerProfileId" from="ensureOut.customerProfileId"/>
+
+            <entity-find-one entity-name="AuthorizeDotNet.PaymentGatewayAuthorizeNet" value-field="pgan"/>
+            <if condition="pgan == null"><return error="true" type="danger"
+                    message="PaymentGatewayAuthorizeNet ${paymentGatewayConfigId} not found."/></if>
+
+            <!-- hostedProfileSettings setting names differ from the payment-page method.
+                 hostedProfileIFrameCommunicatorUrl (NOT hostedPayment*) is required so the page
+                 posts cancel/success/resize messages back and closes after vaulting. -->
+            <set field="iframeJson" from="'{&quot;url&quot;:&quot;' + iframeCommunicatorUrl + '&quot;}'"/>
+            <script><![CDATA[requestString = """<?xml version="1.0" encoding="utf-8"?>
+<getHostedProfilePageRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
+    <merchantAuthentication><name>${pgan.login}</name><transactionKey>${pgan.tranKey}</transactionKey></merchantAuthentication>
+    <customerProfileId>${customerProfileId}</customerProfileId>
+    <hostedProfileSettings>
+        <setting><settingName>hostedProfilePageBorderVisible</settingName><settingValue>false</settingValue></setting>
+        <setting><settingName>hostedProfileValidationMode</settingName><settingValue>${pgan.validationMode == 'none' ? 'testMode' : pgan.validationMode}</settingValue></setting>
+        <setting><settingName>hostedProfileManageOptions</settingName><settingValue>showPayment</settingValue></setting>
+        <setting><settingName>hostedProfileIFrameCommunicatorUrl</settingName><settingValue>${iframeJson}</settingValue></setting>
+    </hostedProfileSettings>
+</getHostedProfilePageRequest>
+            """]]></script>
+            <!-- NOTE: never log requestString; it contains merchant credentials. -->
+            <set field="responseString" from="org.moqui.util.WebUtilities.simpleHttpStringRequest(pgan.transactionUrl, requestString, 'text/xml')"/>
+            <set field="responseNode" from="new groovy.xml.XmlParser().parseText(responseString)"/>
+            <set field="responseCode" from="responseNode.messages[0]?.resultCode[0]?.text()"/>
+            <if condition="!'Ok'.equalsIgnoreCase(responseCode ?: '')">
+                <set field="reasonMessage" from="responseNode.messages[0]?.message[0]?.text[0]?.text()"/>
+                <log level="warn" message="getHostedProfilePage failed for party ${partyId}: ${reasonMessage}"/>
+                <return error="true" type="danger" public="true"
+                        message="Could not start card entry: ${reasonMessage ?: 'gateway error'}"/>
+            </if>
+            <set field="formToken" from="responseNode.token[0]?.text()"/>
+            <if condition="!formToken"><return error="true" type="danger" public="true"
+                    message="Card entry could not be started (no form token)."/></if>
+        </actions>
+    </service>
+
+    <!-- After the hosted profile page vaults a card, pull the party's CIM payment profiles from
+         Authorize.Net and ensure the newest is represented as a Mantle PaymentMethod with the
+         matching gatewayCimId. Returns the paymentMethodId to feed into checkout#Cart. We read the
+         authoritative profile list from the gateway rather than trusting any client-supplied id. -->
+    <service verb="sync" noun="VaultedPaymentMethod">
+        <in-parameters>
+            <parameter name="partyId" required="true"/>
+            <parameter name="paymentGatewayConfigId"/>
+            <parameter name="customerPaymentProfileId"><description>If the client relayed the new
+                profile id we prefer it; otherwise we take the most recent profile on the gateway.</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="paymentMethodId"/>
+            <parameter name="customerPaymentProfileId"/>
+        </out-parameters>
+        <actions>
+            <service-call name="AuthorizeDotNet.CimServices.get#PaymentGatewayConfig"
+                    in-map="[paymentGatewayConfigId:paymentGatewayConfigId]" out-map="gwOut"/>
+            <set field="paymentGatewayConfigId" from="gwOut.paymentGatewayConfigId ?: paymentGatewayConfigId"/>
+            <if condition="!paymentGatewayConfigId">
+                <set field="paymentGatewayConfigId" from="ec.user.getPreference('AuthorizeNetCimPaymentGatewayConfigId')"/>
+            </if>
+            <entity-find-one entity-name="AuthorizeDotNet.PaymentGatewayAuthorizeNet" value-field="pgan"/>
+            <if condition="pgan == null"><return error="true" message="Gateway ${paymentGatewayConfigId} not found."/></if>
+
+            <entity-find-one entity-name="mantle.party.Party" value-field="party">
+                <field-map field-name="partyId"/>
+            </entity-find-one>
+            <if condition="!party?.gatewayCimId"><return error="true" type="danger"
+                    message="No CIM profile for party ${partyId}; nothing to sync."/></if>
+
+            <!-- getCustomerProfileRequest returns the full profile incl. all payment profiles
+                 (card numbers already masked by Authorize.Net). -->
+            <script><![CDATA[requestString = """<?xml version="1.0" encoding="utf-8"?>
+<getCustomerProfileRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
+    <merchantAuthentication><name>${pgan.login}</name><transactionKey>${pgan.tranKey}</transactionKey></merchantAuthentication>
+    <customerProfileId>${party.gatewayCimId}</customerProfileId>
+</getCustomerProfileRequest>
+            """]]></script>
+            <set field="responseString" from="org.moqui.util.WebUtilities.simpleHttpStringRequest(pgan.transactionUrl, requestString, 'text/xml')"/>
+            <set field="responseNode" from="new groovy.xml.XmlParser().parseText(responseString)"/>
+            <set field="responseCode" from="responseNode.messages[0]?.resultCode[0]?.text()"/>
+            <if condition="!'Ok'.equalsIgnoreCase(responseCode ?: '')">
+                <log level="warn" message="getCustomerProfile failed for party ${partyId}"/>
+                <return error="true" type="danger" message="Could not read saved card."/>
+            </if>
+
+            <set field="paymentProfiles" from="responseNode.profile[0]?.paymentProfiles"/>
+            <if condition="!paymentProfiles"><return error="true" type="danger"
+                    message="No saved card found after entry."/></if>
+            <!-- choose the requested profile, else the last one (newest-added). -->
+            <set field="chosen" from="null"/>
+            <iterate list="paymentProfiles" entry="pp">
+                <set field="ppId" from="pp.customerPaymentProfileId[0]?.text()"/>
+                <if condition="customerPaymentProfileId">
+                    <if condition="ppId == customerPaymentProfileId"><set field="chosen" from="pp"/></if>
+                <else>
+                    <set field="chosen" from="pp"/>
+                </else></if>
+            </iterate>
+            <if condition="chosen == null"><return error="true" type="danger" message="Saved card not found."/></if>
+            <set field="customerPaymentProfileId" from="chosen.customerPaymentProfileId[0]?.text()"/>
+            <set field="ccNode" from="chosen.payment[0]?.creditCard[0]"/>
+            <set field="maskedNumber" from="ccNode?.cardNumber[0]?.text()"/><!-- e.g. XXXX1111 -->
+            <set field="lastFour" from="maskedNumber ? maskedNumber.replaceAll(/\D|X/, '') : null"/>
+            <set field="billTo" from="chosen.billTo[0]"/>
+
+            <!-- Is there already a Mantle PaymentMethod for this exact CIM payment profile? -->
+            <entity-find entity-name="mantle.account.method.PaymentMethod" list="existing">
+                <econdition field-name="ownerPartyId" from="partyId"/>
+                <econdition field-name="gatewayCimId" from="customerPaymentProfileId"/>
+            </entity-find>
+            <if condition="existing"><then>
+                <set field="paymentMethodId" from="existing[0].paymentMethodId"/>
+            </then><else>
+                <service-call name="create#mantle.account.method.PaymentMethod" out-map="pmOut"
+                        in-map="[ownerPartyId:partyId, paymentMethodTypeEnumId:'PmtCreditCard',
+                                 paymentGatewayConfigId:paymentGatewayConfigId,
+                                 gatewayCimId:customerPaymentProfileId,
+                                 firstNameOnAccount:billTo?.firstName[0]?.text(),
+                                 lastNameOnAccount:billTo?.lastName[0]?.text()]"/>
+                <set field="paymentMethodId" from="pmOut.paymentMethodId"/>
+                <!-- Store a masked CreditCard record for display (no PAN; Authorize.Net already masked it). -->
+                <service-call name="create#mantle.account.method.CreditCard"
+                        in-map="[paymentMethodId:paymentMethodId,
+                                 cardNumber:maskedNumber,
+                                 expireDate:ccNode?.expirationDate[0]?.text()]"/>
+            </else></if>
+        </actions>
+    </service>
+
+</services>
