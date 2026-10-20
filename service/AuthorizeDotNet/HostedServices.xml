@@ -315,17 +315,27 @@ along with this software (see the LICENSE.md file). If not, see
                 </entity-find-one>
             </else></if>
             <if condition="pmt != null">
-                <service-call name="update#mantle.account.payment.Payment"
-                        in-map="[paymentId:pmt.paymentId, statusId:'PmntDelivered',
-                                 paymentRefNum:transId, paymentGatewayConfigId:paymentGatewayConfigId]"/>
-                <service-call name="create#mantle.account.method.PaymentGatewayResponse"
-                        in-map="[paymentGatewayConfigId:paymentGatewayConfigId, paymentOperationEnumId:'PgoAuthAndCapture',
-                                 paymentId:pmt.paymentId, amountUomId:orderHeader.currencyUomId,
-                                 amount:orderHeader.grandTotal, referenceNum:transId,
-                                 transactionDate:ec.user.nowTimestamp, resultSuccess:'Y', resultError:'N',
-                                 responseCode:responseReason]"/>
+                <!-- Move the Payment to PmntAuthorized (legal transition from PmntProposed; the
+                     Proposed->Delivered jump is rejected by Mantle's status state machine).
+                     PmntAuthorized is in the accepted-complete set the reconciliation honors, and
+                     accurately reflects the auth-and-captured charge. Guard so repeated polls don't
+                     re-attempt an illegal transition once already advanced. -->
+                <if condition="pmt.statusId == 'PmntProposed'">
+                    <service-call name="update#mantle.account.payment.Payment"
+                            in-map="[paymentId:pmt.paymentId, statusId:'PmntAuthorized',
+                                     paymentRefNum:transId, paymentGatewayConfigId:paymentGatewayConfigId]"/>
+                    <service-call name="create#mantle.account.method.PaymentGatewayResponse"
+                            in-map="[paymentGatewayConfigId:paymentGatewayConfigId, paymentOperationEnumId:'PgoAuthAndCapture',
+                                     paymentId:pmt.paymentId, amountUomId:orderHeader.currencyUomId,
+                                     amount:orderHeader.grandTotal, referenceNum:transId,
+                                     transactionDate:ec.user.nowTimestamp, resultSuccess:'Y', resultError:'N',
+                                     responseCode:responseReason]"/>
+                </if>
                 <set field="paymentId" from="pmt.paymentId"/>
-                <set field="paymentStatusId" value="PmntDelivered"/>
+                <entity-find-one entity-name="mantle.account.payment.Payment" value-field="pmtNow">
+                    <field-map field-name="paymentId" from="pmt.paymentId"/>
+                </entity-find-one>
+                <set field="paymentStatusId" from="pmtNow?.statusId"/>
             </if>
         </actions>
     </service>
