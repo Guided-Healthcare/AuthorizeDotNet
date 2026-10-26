@@ -207,6 +207,10 @@ along with this software (see the LICENSE.md file). If not, see
         </out-parameters>
         <actions>
             <set field="authorized" from="false"/>
+            <!-- Track whether transId was supplied by the (untrusted) caller vs resolved by our own
+                 invoiceNumber match. A client-supplied transId MUST carry a present+matching invoice
+                 in the gateway response before we bind it; our own match already guarantees that. -->
+            <set field="transIdFromClient" from="(transId != null &amp;&amp; transId != '')"/>
             <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader">
                 <field-map field-name="orderId"/>
             </entity-find-one>
@@ -222,27 +226,91 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="pgan == null"><return error="true" message="Gateway ${paymentGatewayConfigId} not found."/></if>
 
             <!-- Reliable path: no transId from the unreliable iframe callback. Find our transaction
-                 by invoiceNumber (== orderId) in the unsettled transaction list. A fresh
-                 auth-capture is unsettled until the nightly batch, so it will be present here. -->
+                 by invoiceNumber (== orderId). A fresh auth-capture is unsettled until the nightly
+                 batch, so we scan the unsettled list first (paginated, not just the first 100). If
+                 the charge has already settled (finalize delayed past the batch, or a prior
+                 successful charge the order never recorded), it is NO LONGER in the unsettled list,
+                 so we fall back to the settled transactions in recent batches. Without this fallback
+                 a real charge orphans the order permanently. -->
             <if condition="!transId">
                 <script><![CDATA[
-                    def listRequest = """<?xml version="1.0" encoding="utf-8"?>
+                    import groovy.xml.XmlParser
+                    def anetUrl = pgan.transactionUrl
+                    def login = pgan.login
+                    def tranKey = pgan.tranKey
+                    def wantInvoice = orderId.toString()
+
+                    // --- 1) Unsettled list, paginated (limit 1000/page; API max offset is high). ---
+                    transId = null
+                    def pageLimit = 1000
+                    def offset = 1
+                    def scanned = 0
+                    def hardCap = 20000  // safety ceiling; avoid unbounded scan on a huge backlog
+                    while (transId == null && scanned < hardCap) {
+                        def listReq = """<?xml version="1.0" encoding="utf-8"?>
 <getUnsettledTransactionListRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
-    <merchantAuthentication><name>${pgan.login}</name><transactionKey>${pgan.tranKey}</transactionKey></merchantAuthentication>
+    <merchantAuthentication><name>${login}</name><transactionKey>${tranKey}</transactionKey></merchantAuthentication>
     <sorting><orderBy>submitTimeUTC</orderBy><orderDescending>true</orderDescending></sorting>
-    <paging><limit>100</limit><offset>1</offset></paging>
+    <paging><limit>${pageLimit}</limit><offset>${offset}</offset></paging>
 </getUnsettledTransactionListRequest>"""
-                    def listResp = org.moqui.util.WebUtilities.simpleHttpStringRequest(pgan.transactionUrl, listRequest, 'text/xml')
-                    def listNode = new groovy.xml.XmlParser().parseText(listResp)
-                    def resultCode = listNode.messages?.resultCode?.text()
-                    if ('Ok'.equalsIgnoreCase(resultCode ?: '')) {
-                        // transactions.transaction is a NodeList; find ours by invoiceNumber == orderId.
-                        def match = listNode.transactions.transaction.find { it.invoiceNumber.text() == orderId.toString() }
-                        if (match != null) transId = match.transId.text()
+                        def listResp = org.moqui.util.WebUtilities.simpleHttpStringRequest(anetUrl, listReq, 'text/xml')
+                        def listNode = new XmlParser().parseText(listResp)
+                        if (!'Ok'.equalsIgnoreCase(listNode.messages?.resultCode?.text() ?: '')) break
+                        def txns = listNode.transactions.transaction
+                        def match = txns.find { it.invoiceNumber.text() == wantInvoice }
+                        if (match != null) { transId = match.transId.text() }
+                        def total = (listNode.totalNumInResultSet?.text() ?: '0') as Integer
+                        scanned += txns.size()
+                        if (txns.size() < pageLimit || scanned >= total) break
+                        offset += pageLimit
+                    }
+
+                    // --- 2) Settled fallback: scan recent settled batches for our invoiceNumber. ---
+                    if (transId == null) {
+                        // Look back a bounded window of settlement batches.
+                        def nowUtc = java.time.Instant.now()
+                        def firstUtc = nowUtc.minus(java.time.Duration.ofDays(30))
+                        def fmt = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(java.time.ZoneOffset.UTC)
+                        def batchReq = """<?xml version="1.0" encoding="utf-8"?>
+<getSettledBatchListRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
+    <merchantAuthentication><name>${login}</name><transactionKey>${tranKey}</transactionKey></merchantAuthentication>
+    <firstSettlementDate>${fmt.format(firstUtc)}</firstSettlementDate>
+    <lastSettlementDate>${fmt.format(nowUtc)}</lastSettlementDate>
+</getSettledBatchListRequest>"""
+                        def batchResp = org.moqui.util.WebUtilities.simpleHttpStringRequest(anetUrl, batchReq, 'text/xml')
+                        def batchNode = new XmlParser().parseText(batchResp)
+                        if ('Ok'.equalsIgnoreCase(batchNode.messages?.resultCode?.text() ?: '')) {
+                            def batchIds = batchNode.batchList.batch.collect { it.batchId.text() }
+                            // Most recent batches first.
+                            for (bid in batchIds.reverse()) {
+                                if (transId != null) break
+                                def boff = 1
+                                def bscanned = 0
+                                while (transId == null && bscanned < hardCap) {
+                                    def tlReq = """<?xml version="1.0" encoding="utf-8"?>
+<getTransactionListRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
+    <merchantAuthentication><name>${login}</name><transactionKey>${tranKey}</transactionKey></merchantAuthentication>
+    <batchId>${bid}</batchId>
+    <sorting><orderBy>submitTimeUTC</orderBy><orderDescending>true</orderDescending></sorting>
+    <paging><limit>${pageLimit}</limit><offset>${boff}</offset></paging>
+</getTransactionListRequest>"""
+                                    def tlResp = org.moqui.util.WebUtilities.simpleHttpStringRequest(anetUrl, tlReq, 'text/xml')
+                                    def tlNode = new XmlParser().parseText(tlResp)
+                                    if (!'Ok'.equalsIgnoreCase(tlNode.messages?.resultCode?.text() ?: '')) break
+                                    def btxns = tlNode.transactions.transaction
+                                    def bmatch = btxns.find { it.invoiceNumber.text() == wantInvoice }
+                                    if (bmatch != null) { transId = bmatch.transId.text() }
+                                    def btotal = (tlNode.totalNumInResultSet?.text() ?: '0') as Integer
+                                    bscanned += btxns.size()
+                                    if (btxns.size() < pageLimit || bscanned >= btotal) break
+                                    boff += pageLimit
+                                }
+                            }
+                        }
                     }
                 ]]></script>
                 <if condition="!transId">
-                    <log level="info" message="confirm#HostedTransaction: no unsettled transaction yet for order ${orderId}"/>
+                    <log level="info" message="confirm#HostedTransaction: no matching transaction (unsettled or recent settled) yet for order ${orderId}"/>
                     <return/><!-- not charged yet; caller polls again -->
                 </if>
             </if>
@@ -261,6 +329,9 @@ along with this software (see the LICENSE.md file). If not, see
                 txnOk = false
                 returnedCustomerProfileId = null
                 responseReason = null
+                boundOk = false
+                txnInvoice = null
+                txnAmountStr = null
                 if ('Ok'.equalsIgnoreCase(rc ?: '')) {
                     def txn = responseNode.transaction
                     if (txn != null && txn.size() > 0) {
@@ -271,6 +342,9 @@ along with this software (see the LICENSE.md file). If not, see
                             (['authorizedPendingCapture','capturedPendingSettlement','settledSuccessfully'].contains(txnStatus))
                         def prof = txn.profile
                         if (prof != null && prof.size() > 0) returnedCustomerProfileId = prof.customerProfileId.text()
+                        // Binding fields: the gateway transaction's own invoice + settled/auth amount.
+                        txnInvoice = txn.order?.invoiceNumber?.text()
+                        txnAmountStr = (txn.settleAmount?.text() ?: txn.authAmount?.text() ?: txn.amount?.text())
                     }
                 }
             ]]></script>
@@ -279,6 +353,41 @@ along with this software (see the LICENSE.md file). If not, see
                 <return/>
             </if>
             <if condition="!authorized"><return/></if>
+
+            <!-- BINDING GUARD (defense against a mismatched/forged transId on the fast-path): the
+                 gateway transaction MUST belong to THIS order and match its amount+currency before
+                 we record a Payment against it. The no-transId poll path already matched by
+                 invoiceNumber upstream; a client-supplied transId bypasses that match, so enforce it
+                 here for every path. If the gateway response omits the invoice (some txn types),
+                 we do not falsely reject — we require the amount match instead, which still prevents
+                 binding an unrelated charge. Currency: Authorize.Net settles in the merchant account
+                 currency; we assert amount equality rather than trust a field the API may omit. -->
+            <set field="expectedInvoice" from="orderId.toString()"/>
+            <if condition="transIdFromClient &amp;&amp; txnInvoice != expectedInvoice">
+                <log level="warn" message="confirm#HostedTransaction: client transId ${transId} invoiceNumber '${txnInvoice}' != order ${orderId}; refusing to bind."/>
+                <return error="true" type="danger" message="Payment could not be matched to this order."/>
+            </if>
+            <if condition="txnInvoice &amp;&amp; txnInvoice != expectedInvoice">
+                <log level="warn" message="confirm#HostedTransaction: transId ${transId} invoiceNumber '${txnInvoice}' != order ${orderId}; refusing to bind."/>
+                <return error="true" type="danger" message="Payment could not be matched to this order."/>
+            </if>
+            <set field="expectedAmount" from="orderHeader.grandTotal"/>
+            <script><![CDATA[
+                boundOk = false
+                try {
+                    def txnAmt = (txnAmountStr != null && txnAmountStr != '') ? new BigDecimal(txnAmountStr) : null
+                    def wantAmt = (expectedAmount != null) ? new BigDecimal(expectedAmount.toString()) : null
+                    // Compare at 2dp; gateway returns e.g. 50.00, order grandTotal 50.0000.
+                    if (txnAmt != null && wantAmt != null) {
+                        boundOk = (txnAmt.setScale(2, java.math.RoundingMode.HALF_UP)
+                                == wantAmt.setScale(2, java.math.RoundingMode.HALF_UP))
+                    }
+                } catch (Exception e) { boundOk = false }
+            ]]></script>
+            <if condition="!boundOk">
+                <log level="warn" message="confirm#HostedTransaction: transId ${transId} amount '${txnAmountStr}' != order ${orderId} grandTotal ${orderHeader.grandTotal}; refusing to bind."/>
+                <return error="true" type="danger" message="Payment amount did not match this order."/>
+            </if>
 
             <!-- Bind any newly created CIM customer/payment profile ids to the party. -->
             <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart">
@@ -299,8 +408,17 @@ along with this software (see the LICENSE.md file). If not, see
                  at PmntPromised and legally jumps to the target (PmntPromised->PmntDelivered is an
                  allowed StatusFlowTransition; the raw-create-at-Proposed path I used before is not).
                  PmntDelivered is in the accepted-complete set the reconciliation honors and reflects
-                 the auth-and-captured charge. Idempotent: reuse an existing non-cancelled Payment. -->
-            <entity-find entity-name="mantle.account.payment.Payment" list="payments">
+                 the auth-and-captured charge.
+
+                 CONCURRENCY: lock the OrderHeader row for-update before the read-then-create so two
+                 concurrent confirm/finalize calls (poll racing the callback, or multiple tabs)
+                 serialize here instead of both reading zero Payments and both creating one. The
+                 second caller blocks until the first commits, then sees the existing Payment and
+                 reuses it. Idempotent: reuse an existing non-cancelled Payment. -->
+            <entity-find-one entity-name="mantle.order.OrderHeader" value-field="ohLock" for-update="true">
+                <field-map field-name="orderId"/>
+            </entity-find-one>
+            <entity-find entity-name="mantle.account.payment.Payment" list="payments" for-update="true">
                 <econdition field-name="orderId"/>
                 <econdition field-name="orderPartSeqId"/>
                 <econdition field-name="statusId" operator="not-in" value="PmntCancelled,PmntVoid,PmntDeclined"/>
