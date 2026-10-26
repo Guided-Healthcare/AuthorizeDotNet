@@ -234,7 +234,6 @@ along with this software (see the LICENSE.md file). If not, see
                  a real charge orphans the order permanently. -->
             <if condition="!transId">
                 <script><![CDATA[
-                    import groovy.xml.XmlParser
                     def anetUrl = pgan.transactionUrl
                     def login = pgan.login
                     def tranKey = pgan.tranKey
@@ -254,7 +253,7 @@ along with this software (see the LICENSE.md file). If not, see
     <paging><limit>${pageLimit}</limit><offset>${offset}</offset></paging>
 </getUnsettledTransactionListRequest>"""
                         def listResp = org.moqui.util.WebUtilities.simpleHttpStringRequest(anetUrl, listReq, 'text/xml')
-                        def listNode = new XmlParser().parseText(listResp)
+                        def listNode = new groovy.xml.XmlParser().parseText(listResp)
                         if (!'Ok'.equalsIgnoreCase(listNode.messages?.resultCode?.text() ?: '')) break
                         def txns = listNode.transactions.transaction
                         def match = txns.find { it.invoiceNumber.text() == wantInvoice }
@@ -278,7 +277,7 @@ along with this software (see the LICENSE.md file). If not, see
     <lastSettlementDate>${fmt.format(nowUtc)}</lastSettlementDate>
 </getSettledBatchListRequest>"""
                         def batchResp = org.moqui.util.WebUtilities.simpleHttpStringRequest(anetUrl, batchReq, 'text/xml')
-                        def batchNode = new XmlParser().parseText(batchResp)
+                        def batchNode = new groovy.xml.XmlParser().parseText(batchResp)
                         if ('Ok'.equalsIgnoreCase(batchNode.messages?.resultCode?.text() ?: '')) {
                             def batchIds = batchNode.batchList.batch.collect { it.batchId.text() }
                             // Most recent batches first.
@@ -295,7 +294,7 @@ along with this software (see the LICENSE.md file). If not, see
     <paging><limit>${pageLimit}</limit><offset>${boff}</offset></paging>
 </getTransactionListRequest>"""
                                     def tlResp = org.moqui.util.WebUtilities.simpleHttpStringRequest(anetUrl, tlReq, 'text/xml')
-                                    def tlNode = new XmlParser().parseText(tlResp)
+                                    def tlNode = new groovy.xml.XmlParser().parseText(tlResp)
                                     if (!'Ok'.equalsIgnoreCase(tlNode.messages?.resultCode?.text() ?: '')) break
                                     def btxns = tlNode.transactions.transaction
                                     def bmatch = btxns.find { it.invoiceNumber.text() == wantInvoice }
