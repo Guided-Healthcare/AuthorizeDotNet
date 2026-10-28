@@ -387,7 +387,13 @@ along with this software (see the LICENSE.md file). If not, see
             <log message="CimPaymentServices payment ${payment?.paymentId} ${paymentOperationEnumId} requestString: \n${logReqString}"/>
             <!-- do the HTTP request -->
             <set field="responseString" from="org.moqui.util.WebUtilities.simpleHttpStringRequest(transactionUrl, requestString, 'text/xml')"/>
-            <log message="CimPaymentServices payment ${payment?.paymentId} ${paymentOperationEnumId} responseString: \n${responseString}"/>
+            <!-- PHI/PCI redaction (GH-58): the gateway response body carries the customer's name,
+                 email, full billing/shipping address, phone, and CIM profile IDs. Never log it raw.
+                 mask#CimResponseForLog strips the PII-bearing elements while preserving diagnostic
+                 fields (resultCode, messages, transId, transactionStatus, responseCode, amounts). -->
+            <service-call name="AuthorizeDotNet.CimPaymentServices.mask#CimResponseForLog"
+                    in-map="[responseString:responseString]" out-map="maskOut"/>
+            <log message="CimPaymentServices payment ${payment?.paymentId} ${paymentOperationEnumId} responseString: \n${maskOut.logRespString}"/>
             <set field="responseNode" from="new groovy.xml.XmlParser().parseText(responseString)"/>
 
             <if condition="responseNode.messages">
@@ -407,7 +413,7 @@ along with this software (see the LICENSE.md file). If not, see
                             paymentGatewayConfigId:paymentGatewayConfigId,
                             responseString:responseNode.directResponse[0].text(), delimeter:',']"/>
                 </then><else>
-                    <log level="warn" message="No directResponse in gateway request for payment ${payment.paymentId}, responseString: \n${responseString}"/>
+                    <log level="warn" message="No directResponse in gateway request for payment ${payment.paymentId}, responseString: \n${maskOut.logRespString}"/>
                     <if condition="reasonMessage != null &amp;&amp; reasonMessage.length() > 255"><set field="reasonMessage" from="reasonMessage.substring(0, 255)"/></if>
                     <service-call name="create#mantle.account.method.PaymentGatewayResponse" out-map="context"
                             in-map="[paymentGatewayConfigId:paymentGatewayConfigId, paymentOperationEnumId:paymentOperationEnumId,
@@ -417,6 +423,37 @@ along with this software (see the LICENSE.md file). If not, see
                                 resultSuccess:'N', resultDeclined:'N', resultError:'Y', resultBadExpire:'N', resultBadCardNumber:'N']"/>
                 </else></if>
             </if>
+        </actions>
+    </service>
+    <service verb="mask" noun="CimResponseForLog">
+        <description>PHI/PCI redaction for Authorize.Net gateway responses before they are written to logs
+            (GH-58). The response body carries customer name, email, billing/shipping address, phone,
+            and CIM profile IDs. This strips the PII-bearing elements to a [REDACTED] placeholder while
+            preserving diagnostic fields (resultCode, messages, transId, transactionStatus, responseCode,
+            amounts). Single source of truth — all CIM/Hosted response log sites call this.</description>
+        <in-parameters>
+            <parameter name="responseString"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="logRespString"/>
+        </out-parameters>
+        <actions>
+            <script><![CDATA[
+                logRespString = responseString
+                if (logRespString) {
+                    // whole-element blocks that contain name/address/email/phone/profile IDs
+                    ['customer', 'billTo', 'shipTo', 'profile'].each { tag ->
+                        logRespString = logRespString.replaceAll('(?s)<' + tag + '>.*?</' + tag + '>',
+                                '<' + tag + '>[REDACTED]</' + tag + '>')
+                    }
+                    // standalone identifiers that may appear outside the above blocks
+                    ['customerProfileId', 'customerPaymentProfileId', 'email', 'firstName', 'lastName',
+                     'address', 'city', 'state', 'zip', 'phoneNumber'].each { tag ->
+                        logRespString = logRespString.replaceAll('(?s)<' + tag + '>.*?</' + tag + '>',
+                                '<' + tag + '>[REDACTED]</' + tag + '>')
+                    }
+                }
+            ]]></script>
         </actions>
     </service>
 </services>

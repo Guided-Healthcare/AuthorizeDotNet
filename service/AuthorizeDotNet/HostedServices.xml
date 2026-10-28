@@ -77,7 +77,9 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="dupId"><then>
                     <set field="customerProfileId" from="dupId"/>
                 </then><else>
-                    <log level="warn" message="createCustomerProfile failed for party ${partyId}: ${responseString}"/>
+                    <service-call name="AuthorizeDotNet.CimPaymentServices.mask#CimResponseForLog"
+                            in-map="[responseString:responseString]" out-map="maskOut"/>
+                    <log level="warn" message="createCustomerProfile failed for party ${partyId}: ${maskOut.logRespString}"/>
                     <return error="true" type="danger" message="Could not initialize payment profile."/>
                 </else></if>
             </if>

@@ -164,7 +164,11 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- NOTE: ALWAYS REMOVE THIS BEFORE COMMIT! will contain sensitive information: -->
             <!-- <log level="info" message="========== store#CustomerPaymentMethod requestString: \n${requestString}"/> -->
             <set field="responseString" from="org.moqui.util.WebUtilities.simpleHttpStringRequest(pgan.transactionUrl, requestString, 'text/xml')"/>
-            <log message="store#CustomerPaymentMethod responseString: \n${responseString}"/>
+            <!-- PHI/PCI redaction (GH-58): never log the raw gateway response; it carries profile IDs
+                 and customer PII. mask#CimResponseForLog strips those, keeping diagnostic fields. -->
+            <service-call name="AuthorizeDotNet.CimPaymentServices.mask#CimResponseForLog"
+                    in-map="[responseString:responseString]" out-map="maskOut"/>
+            <log message="store#CustomerPaymentMethod responseString: \n${maskOut.logRespString}"/>
 
             <set field="responseNode" from="new groovy.xml.XmlParser().parseText(responseString)"/>
 
@@ -187,7 +191,7 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
             </if>
             <if condition="!responseCode || !'Ok'.equalsIgnoreCase(responseCode)">
-                <log level="warn" message="Error saving Authorize.Net CIM info for PaymentMethod [${paymentMethodId}]: ${responseString}"/>
+                <log level="warn" message="Error saving Authorize.Net CIM info for PaymentMethod [${paymentMethodId}]: ${maskOut.logRespString}"/>
                 <if condition="reasonMessage != null &amp;&amp; reasonMessage.length() > 255"><set field="reasonMessage" from="reasonMessage.substring(0, 255)"/></if>
                 <service-call name="create#mantle.account.method.PaymentGatewayResponse" out-map="context"
                         in-map="[paymentGatewayConfigId:paymentGatewayConfigId, paymentOperationEnumId:'PgoStoreCim',
