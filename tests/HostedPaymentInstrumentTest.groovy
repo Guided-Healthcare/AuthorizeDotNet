@@ -3,6 +3,51 @@ import org.moqui.util.WebUtilities
 import org.moqui.entity.EntityCondition
 import org.moqui.impl.entity.EntityConditionFactoryImpl
 
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
+import java.net.CookieHandler
+import java.net.ProxySelector
+import java.net.Authenticator
+import java.nio.ByteBuffer
+import java.time.Duration
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executor
+import java.util.concurrent.Flow
+import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLParameters
+
+class InstrumentHttpClient extends HttpClient {
+    InstrumentFixture f
+    @Override Optional<CookieHandler> cookieHandler(){Optional.empty()}
+    @Override Optional<Duration> connectTimeout(){Optional.empty()}
+    @Override HttpClient.Redirect followRedirects(){HttpClient.Redirect.NEVER}
+    @Override Optional<ProxySelector> proxy(){Optional.empty()}
+    @Override SSLContext sslContext(){throw new UnsupportedOperationException()}
+    @Override SSLParameters sslParameters(){new SSLParameters()}
+    @Override Optional<Authenticator> authenticator(){Optional.empty()}
+    @Override HttpClient.Version version(){HttpClient.Version.HTTP_2}
+    @Override Optional<Executor> executor(){Optional.empty()}
+    @Override <T> HttpResponse<T> send(HttpRequest request,HttpResponse.BodyHandler<T> ignored){
+        assert request.method()=='POST'&&request.timeout().get()==Duration.ofSeconds(30)
+        def bytes=new ByteArrayOutputStream();def done=new CompletableFuture<Void>()
+        request.bodyPublisher().get().subscribe(new Flow.Subscriber<ByteBuffer>(){
+            @Override void onSubscribe(Flow.Subscription subscription){subscription.request(Long.MAX_VALUE)}
+            @Override void onNext(ByteBuffer data){byte[] next=new byte[data.remaining()];data.get(next);bytes.write(next)}
+            @Override void onError(Throwable error){done.completeExceptionally(error)}
+            @Override void onComplete(){done.complete(null)}
+        })
+        done.get(1,TimeUnit.SECONDS)
+        def body=f.transport(request.uri().toString(),bytes.toString('UTF-8'))
+        return [statusCode:{->f.httpStatus},body:{->body}] as HttpResponse<T>
+    }
+    @Override <T> CompletableFuture<HttpResponse<T>> sendAsync(HttpRequest request,HttpResponse.BodyHandler<T> handler){throw new UnsupportedOperationException()}
+    @Override <T> CompletableFuture<HttpResponse<T>> sendAsync(HttpRequest request,HttpResponse.BodyHandler<T> handler,HttpResponse.PushPromiseHandler<T> push){throw new UnsupportedOperationException()}
+}
+
+
+
 // Compile actual production XML actions. Replace only storage and HTTP; never call a gateway.
 this.class.classLoader.parseClass(new File(System.getenv('XML_SERVICE_HARNESS')))
 class InstrumentFind {
@@ -57,14 +102,28 @@ class InstrumentFixture {
             message:[hasError:{->!errors.empty},addError:{String message->errors<<message}],
             logger:[log:{Object... ignored->},warn:{Object... ignored->}],
             resource:[expand:{String value,String ignored->value}]]
-        WebUtilities.metaClass.'static'.simpleHttpStringRequest={String url,String body,String type->
+        ec.resource.script={String location,String method,Map extra->
+            assert location=='component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy'
+            def helper=new GroovyShell(this.class.classLoader).parse(new File(location.replace('component://AuthorizeDotNet/','')))
+            helper.binding=new Binding([ec:ec]+extra);helper.invokeMethod(method,null)
+        }
+        WebUtilities.metaClass.'static'.simpleHttpStringRequest={String url,String body,String type->throw new AssertionError('Legacy trust-all HTTP helper was called')}
+        HttpClient.metaClass.'static'.newBuilder={->
+            def holder=[:]
+            def builder=[connectTimeout:{Duration timeout->assert timeout==Duration.ofSeconds(15);holder.value},
+                followRedirects:{HttpClient.Redirect redirect->assert redirect==HttpClient.Redirect.NEVER;holder.value},
+                build:{->new InstrumentHttpClient(f:this)}] as HttpClient.Builder
+            holder.value=builder;builder
+        }
+    }
+    int httpStatus=200
+    String transport(String url,String body){
             assert url=='https://example.invalid/never-contact'
             def request=new groovy.xml.XmlParser().parseText(body)
             assert request.name().toString().endsWith('getTransactionDetailsRequest')
             assert request.transId.text()=='synthetic-transaction'
             events<<'isolated-details'
             """<getTransactionDetailsResponse><messages><resultCode>Ok</resultCode></messages><transaction><transactionStatus>${txnStatus}</transactionStatus><responseCode>${reason}</responseCode><order><invoiceNumber>${invoice}</invoiceNumber></order><settleAmount>${amount}</settleAmount></transaction></getTransactionDetailsResponse>"""
-        }
     }
     Map run(String file,String verb,String noun,Map input){
         def node=MNode.parse(new File(file)).children('service').find{it.attribute('verb')==verb&&it.attribute('noun')==noun}

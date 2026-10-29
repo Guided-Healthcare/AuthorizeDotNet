@@ -404,7 +404,7 @@ along with this software (see the LICENSE.md file). If not, see
             </then><else>
                 <service-call name="mantle.account.PaymentServices.create#Payment" out-map="createPmtOut"
                         in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId,
-                                 paymentTypeEnumId:'PtInvoicePayment', statusId:'PmntDelivered',
+                                 paymentTypeEnumId:'PtInvoicePayment', paymentInstrumentEnumId:'PiCreditCard', statusId:'PmntDelivered',
                                  amount:orderHeader.grandTotal, amountUomId:orderHeader.currencyUomId,
                                  fromPartyId:customerPartyId, toPartyId:vendorPartyId,
                                  paymentRefNum:transId, effectiveDate:ec.user.nowTimestamp,
