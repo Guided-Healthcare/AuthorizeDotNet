@@ -33,65 +33,27 @@ along with this software (see the LICENSE.md file). If not, see
 
     <!-- Ensure the party has an Authorize.Net CIM customer profile, so the hosted payment form can
          show their saved cards and save new ones. Returns customerProfileId (party.gatewayCimId). -->
-    <service verb="ensure" noun="CustomerProfile">
+    <service verb="ensure" noun="CustomerProfile" authenticate="true" allow-remote="false"
+            transaction="use-or-begin" no-tx-cache="true" no-remember-parameters="true"
+            type="script" location="component://AuthorizeDotNet/service/AuthorizeDotNet/HostedProfileServices.groovy" method="ensureCustomerProfile">
         <in-parameters>
             <parameter name="partyId" required="true"/>
             <parameter name="paymentGatewayConfigId" required="true"/>
         </in-parameters>
         <out-parameters><parameter name="customerProfileId"/></out-parameters>
-        <actions>
-            <entity-find-one entity-name="mantle.party.Party" value-field="party" for-update="true">
-                <field-map field-name="partyId"/>
-            </entity-find-one>
-            <if condition="party == null"><return error="true" message="Party ${partyId} not found."/></if>
-            <if condition="party.gatewayCimId">
-                <set field="customerProfileId" from="party.gatewayCimId"/>
-                <return/>
-            </if>
+    </service>
 
-            <entity-find-one entity-name="AuthorizeDotNet.PaymentGatewayAuthorizeNet" value-field="pgan"/>
-            <if condition="pgan == null"><return error="true" message="Gateway ${paymentGatewayConfigId} not found."/></if>
-
-            <!-- Email is optional. Resolve via the party's primary email contact mech (the
-                 'Email#...ContactMech' relationship exists on PaymentMethod, NOT Party). -->
-            <service-call name="mantle.party.ContactServices.get#PartyContactInfo" out-map="partyContact"
-                    in-map="[partyId:partyId, emailContactMechPurposeId:'EmailPrimary']"/>
-            <set field="emailAddress" from="partyContact?.emailAddress ?: ''"/>
-            <script><![CDATA[requestString = """<?xml version="1.0" encoding="utf-8"?>
-<createCustomerProfileRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
-    <merchantAuthentication><name>${pgan.login}</name><transactionKey>${pgan.tranKey}</transactionKey></merchantAuthentication>
-    <profile>
-        <merchantCustomerId>${party.partyId}_${getRandomString(5)}</merchantCustomerId>
-        <email>${emailAddress}</email>
-    </profile>
-</createCustomerProfileRequest>
-            """]]></script>
-            <!-- NOTE: never log requestString; it contains merchant credentials. -->
-            <set field="responseString" from="org.moqui.util.WebUtilities.simpleHttpStringRequest(pgan.transactionUrl, requestString, 'text/xml')"/>
-            <set field="responseNode" from="new groovy.xml.XmlParser().parseText(responseString)"/>
-            <set field="responseCode" from="responseNode.messages[0]?.resultCode[0]?.text()"/>
-
-            <if condition="!'Ok'.equalsIgnoreCase(responseCode ?: '')">
-                <!-- Duplicate-profile error (E00039) carries the existing profile id in the text. -->
-                <set field="dupId" from="responseNode.messages[0]?.message[0]?.text[0]?.text()?.replaceAll(/\D/, '')"/>
-                <if condition="dupId"><then>
-                    <set field="customerProfileId" from="dupId"/>
-                </then><else>
-                    <service-call name="AuthorizeDotNet.CimPaymentServices.mask#CimResponseForLog"
-                            in-map="[responseString:responseString]" out-map="maskOut"/>
-                    <log level="warn" message="createCustomerProfile failed for party ${partyId}: ${maskOut.logRespString}"/>
-                    <return error="true" type="danger" message="Could not initialize payment profile."/>
-                </else></if>
-            </if>
-            <if condition="!customerProfileId">
-                <set field="customerProfileId" from="responseNode.customerProfileId[0]?.text()"/>
-            </if>
-            <if condition="!customerProfileId"><return error="true" type="danger"
-                    message="Could not initialize payment profile (no id)."/></if>
-
-            <set field="party.gatewayCimId" from="customerProfileId"/>
-            <entity-update value-field="party"/>
-        </actions>
+    <!-- Internal capability used by ensure above. Fetches under the selected merchant and
+         returns only a verified profile ID; gateway response/payment fields never leave it. -->
+    <service verb="verify" noun="CustomerProfileOwner" authenticate="true" allow-remote="false"
+            transaction="use-or-begin" no-tx-cache="true" no-remember-parameters="true"
+            type="script" location="component://AuthorizeDotNet/service/AuthorizeDotNet/HostedProfileServices.groovy" method="verifyCustomerProfileOwner">
+        <in-parameters>
+            <parameter name="partyId" required="true"/>
+            <parameter name="paymentGatewayConfigId" required="true"/>
+            <parameter name="customerProfileId" required="true"/>
+        </in-parameters>
+        <out-parameters><parameter name="customerProfileId"/></out-parameters>
     </service>
 
     <!-- Mint a one-time Accept Hosted PAYMENT page token for an order. authCaptureTransaction (one
@@ -153,13 +115,13 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="refId.length() > 20"><set field="refId" from="refId.substring(0, 20)"/></if>
             <script><![CDATA[requestString = """<?xml version="1.0" encoding="utf-8"?>
 <getHostedPaymentPageRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
-    <merchantAuthentication><name>${pgan.login}</name><transactionKey>${pgan.tranKey}</transactionKey></merchantAuthentication>
-    <refId>${refId}</refId>
+    <merchantAuthentication><name>${encodeForXmlAttribute(pgan.login)}</name><transactionKey>${encodeForXmlAttribute(pgan.tranKey)}</transactionKey></merchantAuthentication>
+    <refId>${encodeForXmlAttribute(refId)}</refId>
     <transactionRequest>
         <transactionType>authCaptureTransaction</transactionType>
         <amount>${amount}</amount>
         ${customerProfileXml}
-        <order><invoiceNumber>${orderId}</invoiceNumber><description>UniquelyMe order ${orderId}</description></order>
+        <order><invoiceNumber>${encodeForXmlAttribute(orderId)}</invoiceNumber><description>UniquelyMe order ${encodeForXmlAttribute(orderId)}</description></order>
     </transactionRequest>
     <hostedPaymentSettings>
         <setting><settingName>hostedPaymentReturnOptions</settingName><settingValue>{"showReceipt": false}</settingValue></setting>
@@ -174,14 +136,12 @@ along with this software (see the LICENSE.md file). If not, see
 </getHostedPaymentPageRequest>
             """]]></script>
             <!-- NOTE: never log requestString; it contains merchant credentials. -->
-            <set field="responseString" from="org.moqui.util.WebUtilities.simpleHttpStringRequest(pgan.transactionUrl, requestString, 'text/xml')"/>
-            <set field="responseNode" from="new groovy.xml.XmlParser().parseText(responseString)"/>
+            <set field="responseString" from="ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'postHostedXml', [targetUrl:pgan.transactionUrl,xmlPayload:requestString])"/>
+            <set field="responseNode" from="ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'parseHostedXml', [xmlPayload:responseString])"/>
             <set field="responseCode" from="responseNode.messages[0]?.resultCode[0]?.text()"/>
             <if condition="!'Ok'.equalsIgnoreCase(responseCode ?: '')">
-                <set field="reasonMessage" from="responseNode.messages[0]?.message[0]?.text[0]?.text()"/>
-                <log level="warn" message="getHostedPaymentPage failed for order ${orderId}: ${reasonMessage}"/>
                 <return error="true" type="danger" public="true"
-                        message="Could not start payment: ${reasonMessage ?: 'gateway error'}"/>
+                        message="Could not start payment. Check its payment status or contact support."/>
             </if>
             <set field="formToken" from="responseNode.token[0]?.text()"/>
             <if condition="!formToken"><return error="true" type="danger" public="true"
@@ -250,12 +210,12 @@ along with this software (see the LICENSE.md file). If not, see
                     while (transId == null && scanned < hardCap) {
                         def listReq = """<?xml version="1.0" encoding="utf-8"?>
 <getUnsettledTransactionListRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
-    <merchantAuthentication><name>${login}</name><transactionKey>${tranKey}</transactionKey></merchantAuthentication>
+    <merchantAuthentication><name>${encodeForXmlAttribute(login)}</name><transactionKey>${encodeForXmlAttribute(tranKey)}</transactionKey></merchantAuthentication>
     <sorting><orderBy>submitTimeUTC</orderBy><orderDescending>true</orderDescending></sorting>
     <paging><limit>${pageLimit}</limit><offset>${offset}</offset></paging>
 </getUnsettledTransactionListRequest>"""
-                        def listResp = org.moqui.util.WebUtilities.simpleHttpStringRequest(anetUrl, listReq, 'text/xml')
-                        def listNode = new groovy.xml.XmlParser().parseText(listResp)
+                        def listResp = ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'postHostedXml', [targetUrl:anetUrl,xmlPayload:listReq])
+                        def listNode = ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'parseHostedXml', [xmlPayload:listResp])
                         if (!'Ok'.equalsIgnoreCase(listNode.messages?.resultCode?.text() ?: '')) break
                         def txns = listNode.transactions.transaction
                         def match = txns.find { it.invoiceNumber.text() == wantInvoice }
@@ -274,12 +234,12 @@ along with this software (see the LICENSE.md file). If not, see
                         def fmt = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(java.time.ZoneOffset.UTC)
                         def batchReq = """<?xml version="1.0" encoding="utf-8"?>
 <getSettledBatchListRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
-    <merchantAuthentication><name>${login}</name><transactionKey>${tranKey}</transactionKey></merchantAuthentication>
+    <merchantAuthentication><name>${encodeForXmlAttribute(login)}</name><transactionKey>${encodeForXmlAttribute(tranKey)}</transactionKey></merchantAuthentication>
     <firstSettlementDate>${fmt.format(firstUtc)}</firstSettlementDate>
     <lastSettlementDate>${fmt.format(nowUtc)}</lastSettlementDate>
 </getSettledBatchListRequest>"""
-                        def batchResp = org.moqui.util.WebUtilities.simpleHttpStringRequest(anetUrl, batchReq, 'text/xml')
-                        def batchNode = new groovy.xml.XmlParser().parseText(batchResp)
+                        def batchResp = ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'postHostedXml', [targetUrl:anetUrl,xmlPayload:batchReq])
+                        def batchNode = ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'parseHostedXml', [xmlPayload:batchResp])
                         if ('Ok'.equalsIgnoreCase(batchNode.messages?.resultCode?.text() ?: '')) {
                             def batchIds = batchNode.batchList.batch.collect { it.batchId.text() }
                             // Most recent batches first.
@@ -290,13 +250,13 @@ along with this software (see the LICENSE.md file). If not, see
                                 while (transId == null && bscanned < hardCap) {
                                     def tlReq = """<?xml version="1.0" encoding="utf-8"?>
 <getTransactionListRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
-    <merchantAuthentication><name>${login}</name><transactionKey>${tranKey}</transactionKey></merchantAuthentication>
-    <batchId>${bid}</batchId>
+    <merchantAuthentication><name>${encodeForXmlAttribute(login)}</name><transactionKey>${encodeForXmlAttribute(tranKey)}</transactionKey></merchantAuthentication>
+    <batchId>${encodeForXmlAttribute(bid)}</batchId>
     <sorting><orderBy>submitTimeUTC</orderBy><orderDescending>true</orderDescending></sorting>
     <paging><limit>${pageLimit}</limit><offset>${boff}</offset></paging>
 </getTransactionListRequest>"""
-                                    def tlResp = org.moqui.util.WebUtilities.simpleHttpStringRequest(anetUrl, tlReq, 'text/xml')
-                                    def tlNode = new groovy.xml.XmlParser().parseText(tlResp)
+                                    def tlResp = ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'postHostedXml', [targetUrl:anetUrl,xmlPayload:tlReq])
+                                    def tlNode = ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'parseHostedXml', [xmlPayload:tlResp])
                                     if (!'Ok'.equalsIgnoreCase(tlNode.messages?.resultCode?.text() ?: '')) break
                                     def btxns = tlNode.transactions.transaction
                                     def bmatch = btxns.find { it.invoiceNumber.text() == wantInvoice }
@@ -318,13 +278,13 @@ along with this software (see the LICENSE.md file). If not, see
 
             <script><![CDATA[requestString = """<?xml version="1.0" encoding="utf-8"?>
 <getTransactionDetailsRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
-    <merchantAuthentication><name>${pgan.login}</name><transactionKey>${pgan.tranKey}</transactionKey></merchantAuthentication>
-    <transId>${transId}</transId>
+    <merchantAuthentication><name>${encodeForXmlAttribute(pgan.login)}</name><transactionKey>${encodeForXmlAttribute(pgan.tranKey)}</transactionKey></merchantAuthentication>
+    <transId>${encodeForXmlAttribute(transId)}</transId>
 </getTransactionDetailsRequest>
             """]]></script>
-            <set field="responseString" from="org.moqui.util.WebUtilities.simpleHttpStringRequest(pgan.transactionUrl, requestString, 'text/xml')"/>
+            <set field="responseString" from="ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'postHostedXml', [targetUrl:pgan.transactionUrl,xmlPayload:requestString])"/>
             <script><![CDATA[
-                def responseNode = new groovy.xml.XmlParser().parseText(responseString)
+                def responseNode = ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'parseHostedXml', [xmlPayload:responseString])
                 def rc = responseNode.messages?.resultCode?.text()
                 authorized = false
                 txnOk = false
