@@ -39,6 +39,8 @@ class ProfileHttpClient extends HttpClient {
         })
         done.get(1,TimeUnit.SECONDS)
         def body=f.transport(request.uri().toString(),bytes.toString('UTF-8'))
+        // Real Authorize.Net XML API responses begin with a UTF-8 byte-order mark.
+        if(f.bom&&body!=null)body='\uFEFF'+body
         return [statusCode:{->f.httpStatus},body:{->body}] as HttpResponse<T>
     }
     @Override <T> CompletableFuture<HttpResponse<T>> sendAsync(HttpRequest request,HttpResponse.BodyHandler<T> handler){throw new UnsupportedOperationException()}
@@ -86,7 +88,7 @@ class ProfileFixture {
         'mantle.order.OrderHeader':[[orderId:'order',grandTotal:75G]],
         'mantle.order.OrderPart':[[orderId:'order',orderPartSeqId:'01',customerPartyId:'patient']]
     ]
-    int httpStatus=200
+    int httpStatus=200;boolean bom=true
     String caller='patient';List errors=[],requests=[],locks=[],events=[],logs=[];int writes=0
     Closure response;Map ec
     ProfileFixture(){
@@ -299,6 +301,17 @@ check('unsettled settled-batch and transaction-list scans use safe transport bef
     try{f.run('confirm','HostedTransaction',[transId:'789'])}catch(Exception error){rejected=error.message=='Payment gateway request unavailable'&&error.cause==null}
     assert rejected&&f.requests.size()==1&&f.writes==0
 }}
+[true,false].each{withBom->check('gateway response '+(withBom?'with':'without')+' a leading byte-order mark creates and binds a new profile'){
+    // Authorize.Net prefixes XML API responses with U+FEFF; the strict parser must see clean XML.
+    def f=new ProfileFixture();f.bom=withBom;f.tables['mantle.party.Party'][0].gatewayCimId=null
+    f.response={request,url->ProfileFixture.created('456')}
+    assert f.ensure().customerProfileId=='456'&&!f.errors&&f.writes==1
+}}
+check('hosted token mint parses a byte-order-mark response from the real gateway shape'){
+    def f=new ProfileFixture()
+    f.response={request,url->request.name().toString().endsWith('getCustomerProfileRequest') ? ProfileFixture.profile('patient','patient@example.invalid') : '<getHostedPaymentPageResponse xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd"><messages><resultCode>Ok</resultCode></messages><token>ISOLATED_TOKEN_SENTINEL</token></getHostedPaymentPageResponse>'}
+    assert f.mint().formToken=='ISOLATED_TOKEN_SENTINEL'&&!f.errors
+}
 ['mint','confirm'].each{operation->check('malformed hosted '+operation+' response never exposes parser body diagnostics'){
     def f=new ProfileFixture();f.response={request,url->
         request.name().toString().endsWith('getCustomerProfileRequest') ? ProfileFixture.profile('patient','patient@example.invalid') : '<gatewayResponse>&PRIVATE_RESPONSE_SENTINEL;</gatewayResponse>'

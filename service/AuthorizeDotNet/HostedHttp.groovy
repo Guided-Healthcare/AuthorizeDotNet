@@ -22,7 +22,11 @@ String postHostedXml() {
                 .POST(HttpRequest.BodyPublishers.ofString(xmlPayload as String, StandardCharsets.UTF_8)).build()
         def reply = HOSTED_CLIENT.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
         if (reply.statusCode() != 200) throw new IOException('Gateway request unavailable')
-        return reply.body()
+        // Authorize.Net XML API responses begin with a UTF-8 byte-order mark, which the strict
+        // XML parser rejects. Strip it, as Moqui's WebUtilities (StringUtilities.toStringCleanBom)
+        // did for the previous transport.
+        String body = reply.body()
+        return body != null && body.startsWith('\uFEFF') ? body.substring(1) : body
     } catch (InterruptedException ignored) {
         Thread.currentThread().interrupt()
         throw new IllegalStateException('Payment gateway request unavailable')
