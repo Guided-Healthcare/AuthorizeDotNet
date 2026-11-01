@@ -148,7 +148,7 @@ class InstrumentFixture {
             case 'mantle.account.PaymentServices.set#PaymentAutoInfo':return run(MANTLE,'set','PaymentAutoInfo',input)
             case 'create#mantle.account.payment.Payment':
                 assert events.contains('lock:mantle.order.OrderHeader')
-                Map row=input.findAll{k,v->k in ['orderId','orderPartSeqId','paymentTypeEnumId','statusId','paymentInstrumentEnumId','paymentMethodId','amount','amountUomId','fromPartyId','toPartyId','paymentRefNum','effectiveDate','paymentGatewayConfigId']}
+                Map row=input.findAll{k,v->k in ['orderId','orderPartSeqId','paymentTypeEnumId','statusId','paymentInstrumentEnumId','paymentMethodId','amount','amountUomId','fromPartyId','toPartyId','paymentRefNum','paymentAuthCode','effectiveDate','paymentGatewayConfigId']}
                 row.paymentId='synthetic-payment';tables['mantle.account.payment.Payment']<<row
                 return [paymentId:row.paymentId]
             case 'update#mantle.account.payment.Payment':

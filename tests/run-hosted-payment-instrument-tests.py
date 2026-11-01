@@ -22,5 +22,8 @@ jars += [str(p) for group in cache.glob('org.eclipse.jetty*') for p in group.rgl
 jars += [str(p) for p in (framework / 'build/libs').glob('moqui-framework-*.jar')]
 assert any('/groovy-5.0.3.jar' in p for p in jars) and any('/moqui-framework-' in p for p in jars)
 os.chdir(Path(__file__).resolve().parent.parent)
-sys.exit(subprocess.run(['java', '-cp', os.pathsep.join(jars), 'groovy.ui.GroovyMain',
-                         'tests/HostedPaymentInstrumentTest.groovy'], env=os.environ.copy()).returncode)
+tests = sys.argv[1:] or ['tests/HostedPaymentInstrumentTest.groovy', 'tests/HostedTransactionMetadataTest.groovy']
+for test in tests:
+    result = subprocess.run(['java', '-cp', os.pathsep.join(jars), 'groovy.ui.GroovyMain', test], env=os.environ.copy())
+    if result.returncode:
+        raise SystemExit(result.returncode)
