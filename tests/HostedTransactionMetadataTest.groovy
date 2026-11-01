@@ -78,7 +78,7 @@ check('caller supplied metadata never overrides the server transaction details')
 }
 ['declined','underReview','unknown','capturedPendingSettlement'].each{status->
     check('unapproved or unknown response '+status+' stores no payment or metadata'){
-        def f=fixture(metadata);f.txnStatus=status;f.reason=status=='capturedPendingSettlement'?'4':'2'
+        def f=fixture(metadata);f.txnStatus=status;f.reason=status=='unknown'?'1':status in ['underReview','capturedPendingSettlement']?'4':'2'
         assert !f.confirm().authorized
         assert f.tables['mantle.account.payment.Payment'].empty && f.tables['mantle.account.method.PaymentGatewayResponse'].empty
     }
