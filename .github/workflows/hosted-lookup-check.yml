@@ -1,0 +1,58 @@
+name: Isolated hosted lookup cost and confirmation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'service/AuthorizeDotNet/HostedServices.xml'
+      - 'service/AuthorizeDotNet/HostedProfileServices.groovy'
+      - 'service/AuthorizeDotNet/HostedHttp.groovy'
+      - 'tests/**'
+      - '.github/workflows/hosted-lookup-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  hosted-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: moqui/moqui-framework
+          ref: 62d38d3252eba1793d4fc779d8e3386371cd1677
+          path: .codex-work/moqui
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: moqui/mantle-usl
+          ref: 4e924102a52de2cb0b23fd7464eed2b14e6da4c1
+          path: .codex-work/mantle-usl
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: moqui/mantle-udm
+          ref: a7126b8568f49323556349cb59105e34147247aa
+          path: .codex-work/mantle-udm
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Compile the pinned public framework
+        working-directory: .codex-work/moqui
+        run: ./gradlew --no-daemon :framework:jar
+      - name: Verify confirmation, metadata and inherited profile boundaries without network transport
+        env:
+          MOQUI_FRAMEWORK_ROOT: ${{ github.workspace }}/.codex-work/moqui/framework
+          XML_SERVICE_HARNESS: ${{ github.workspace }}/tests/support/XmlServiceHarness.groovy
+          MANTLE_USL_ROOT: ${{ github.workspace }}/.codex-work/mantle-usl
+          MANTLE_UDM_ROOT: ${{ github.workspace }}/.codex-work/mantle-udm
+        run: |
+          python3 tests/run-hosted-payment-instrument-tests.py
+          python3 tests/run-hosted-profile-owner-tests.py
