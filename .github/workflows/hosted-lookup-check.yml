@@ -2,6 +2,14 @@ name: Isolated hosted lookup cost and confirmation
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'service/AuthorizeDotNet/HostedServices.xml'
+      - 'service/AuthorizeDotNet/HostedProfileServices.groovy'
+      - 'service/AuthorizeDotNet/HostedHttp.groovy'
+      - 'tests/**'
+      - '.github/workflows/hosted-lookup-check.yml'
   pull_request:
     branches: [main]
     paths:

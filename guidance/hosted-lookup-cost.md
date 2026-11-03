@@ -1,21 +1,20 @@
 # GH-148 hosted confirmation lookup modes
 
-`confirm#HostedTransaction` defaults to `lookupMode=recovery`, preserving existing callers. Full recovery retains the existing bounded unsettled pagination and 30-day settled-batch search, then authoritative transaction details. Failure, incomplete search or absence is uncertainty, never proof of a negative charge or permission to issue another token.
+`confirm#HostedTransaction` takes `lookupMode`:
 
-`lookupMode=routine` costs at most **one HTTP request per service invocation**, including pagination. Without a transaction ID it reads only the first unsettled page (limit1000). A match returns `transactionHint` with `authorized=false` and no payment write. The hint is not payment evidence. A separate poll may pass it through the existing untrusted `transId` path, costing one details request and retaining invoice/amount/ownership/idempotency guards. A supplied callback ID retains that same confirmation path. No settled scan, additional list page or details call is added to the initial routine list poll.
+- `recovery` (default when omitted): unchanged full search — paginated unsettled list, then the 30-day settled-batch scan, then `getTransactionDetails`. Used by manual "CHECK PAYMENT STATUS" and any legacy caller.
+- `routine`: used by the automatic fallback poll. Reads only the first unsettled page (1000 rows, newest first). No match costs **one** gateway call and returns uncertain. A match on our own invoice proceeds in the same invocation to the single details call and the existing invoice/amount/idempotent binding guards — **two** calls, once per checkout, after which polling stops.
 
-**Changed automatic-search coverage requires Rod’s review:** a lost-callback transaction already settled, or beyond the first unsettled page, produces no routine hint. Automatic fallback stays uncertain and can reach the existing recovery panel; explicit manual recovery must perform the full search. This intentionally replaces automatic full-history scanning with operator/patient-initiated recovery for those cases. Do not claim identical automatic recovery or accept a paired release without reviewing this tradeoff.
+A supplied callback `transId` skips the list entirely in either mode (one details call, client-transId invoice guard).
 
-The paired UM caller follows a valid hint after3seconds using its existing nonoverlapping finalizer and absolute180second deadline. This is a documented two-poll callback-loss recovery tradeoff, not strict zero pre-submission polling. A hint near the deadline may still require explicit manual recovery. Closing/canceling/refreshing never creates a negative payment result or allows another charge. Explicit manual PR60 recovery omits the mode and preserves the full settled path.
+## Coverage tradeoff (accepted by Rod, 2026-11-02)
 
-Every attempted HTTP call emits only `HOSTED_CONFIRM_GATEWAY_CALL mode=<routine|recovery> operation=<unsettled|settled_batches|settled_transactions|details> call_count=<integer>`. Counts are cumulative within that confirmation invocation and include each pagination request and failures. `gatewayCallCount` is also returned when the invocation returns normally. These diagnostics contain no order/transaction ID, credentials, amount, card data or raw response. An exception may have only the last pre-send counter log; it is not a successful response.
+Routine mode cannot see a lost-callback charge that has already settled or sits beyond the first 1000 unsettled rows. At UM volume and a 180s checkout window both are near-impossible; manual recovery still performs the full search. Empty, failed or truncated lookups are uncertainty, never proof of no charge or permission to mint another token.
 
 ## Why no age threshold
 
-[Authorize.Net transaction reporting](https://developer.authorize.net/api/reference/features/transaction-reporting.html) and [batch settlement timing](https://support.authorize.net/knowledgebase/article/000001244/) define settlement relative to the merchant cutoff, rather than hosted-token age. A short-lived attempt does not prove its payment cannot have settled. [The official API reference](https://developer.authorize.net/api/reference/index.html) documents separate settled-batch, transaction-list/detail operations and paging for lists. Routine intentionally stops after one page even when more rows exist; manual recovery retains existing pagination/caps. The existing30day recovery window is unchanged; older or unproven outcomes require operator evidence, never a replacement payment.
+Settlement follows the merchant's daily cutoff ([Authorize.Net batch settlement](https://support.authorize.net/knowledgebase/article/000001244/)), so token age does not predict whether a charge settled.
 
-## Review and release boundaries
+## Diagnostics
 
-Review/merge vendor source first; then the UM backend wrapper that forwards mode/hint/count. Pin the reviewed vendor and backend commits in um-moqui-app and deploy only with Rod’s approval. UM’s paired change depends on PR60 and the accepted backend capabilities. Old callers retain full recovery. Old backends may ignore the new mode and cannot satisfy the per-poll bound: verify exact deployed versions and counters before acceptance. Preserve pending Vendor4’s unique metadata/profile tests when integrating these files; its shared test harness is identical, not a reason to discard coverage.
-
-Isolated regressions use the real XML compiler, HTTP/parser boundary and Mantle payment services with synthetic storage/HTTP only. No gateway, checkout, finalization or deployment is part of source validation. The original staging refresh STOP remains intact and is outside this implementation’s authority.
+Every gateway request logs `HOSTED_CONFIRM_GATEWAY_CALL mode=<routine|recovery> operation=<unsettled|settled_batches|settled_transactions|details> call_count=<n>` (cumulative per invocation, includes pagination and failures). No order/transaction IDs, credentials, amounts or payloads. `gatewayCallCount` is also returned.

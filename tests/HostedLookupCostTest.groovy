@@ -26,22 +26,25 @@ def run={f,Map input=[:]-> f.run('service/AuthorizeDotNet/HostedServices.xml','c
 check('routine empty fallback costs exactly one request and never scans settled history'){
  def f=fixture('empty');def r=run(f,[lookupMode:'routine']);assert !r.authorized;assert f.lookupRequests.size()==1;assert r.gatewayCallCount==1;assert f.tables['mantle.account.payment.Payment'].empty
 }
-check('routine found invoice returns only an untrusted hint within one request'){
- def f=fixture('found');def r=run(f,[lookupMode:'routine']);assert !r.authorized;assert r.transactionHint=='123456789';assert f.lookupRequests.size()==1;assert f.tables['mantle.account.payment.Payment'].empty
+check('routine found invoice confirms in the same poll with one list and one details request'){
+ def f=fixture('found');def r=run(f,[lookupMode:'routine']);assert r.authorized;assert f.lookupRequests*.op.collect{it.endsWith('getUnsettledTransactionListRequest')?'list':(it.endsWith('getTransactionDetailsRequest')?'details':it)}==['list','details'];assert r.gatewayCallCount==2;assert f.tables['mantle.account.payment.Payment'].size()==1
 }
-check('hint confirmation in a separate poll uses exactly one authoritative details request'){
+check('routine own invoice match still refuses when gateway details disagree'){
+ def f=fixture('foreign');def r=run(f,[lookupMode:'routine']);assert f.errors;assert f.lookupRequests.size()==2;assert f.tables['mantle.account.payment.Payment'].empty
+}
+check('routine with a supplied callback transId uses exactly one authoritative details request'){
  def f=fixture('found');def r=run(f,[lookupMode:'routine',transId:'123456789']);assert r.authorized;assert f.lookupRequests*.op.every{it.endsWith('getTransactionDetailsRequest')};assert r.gatewayCallCount==1;assert f.tables['mantle.account.payment.Payment'].size()==1
 }
 check('explicit legacy recovery retains settled lookup and full verification'){
  def f=fixture('settled');def r=run(f);assert r.authorized;assert f.lookupRequests.size()==4;assert r.gatewayCallCount==4
 }
 check('routine pagination is bounded to the first page even when more rows exist'){
- def f=fixture('page-two');def r=run(f,[lookupMode:'routine']);assert !r.authorized;assert !r.transactionHint;assert f.lookupRequests.size()==1;assert f.lookupRequests[0].offset=='1'
+ def f=fixture('page-two');def r=run(f,[lookupMode:'routine']);assert !r.authorized;assert f.lookupRequests.size()==1;assert f.lookupRequests[0].offset=='1'
 }
 check('explicit recovery follows pagination and verifies the matching transaction'){
  def f=fixture('page-two');def r=run(f,[lookupMode:'recovery']);assert r.authorized;assert f.lookupRequests*.offset.contains('1001');assert r.gatewayCallCount==3
 }
-check('forged hint still cannot bypass existing invoice correlation'){
+check('forged callback transId still cannot bypass existing invoice correlation'){
  def f=fixture('foreign');def r=run(f,[lookupMode:'routine',transId:'123456789']);assert f.errors;assert f.tables['mantle.account.payment.Payment'].empty;assert f.lookupRequests.size()==1
 }
 ['gateway-error','malformed','http-error'].each{scenario->check('routine '+scenario+' never records payment or authorizes retry'){
@@ -55,11 +58,11 @@ check('diagnostics count every request and contain no invoice, credential or pay
 check('unknown lookup mode is rejected before any gateway request'){
  def f=fixture('empty');def r=run(f,[lookupMode:'invalid']);assert f.errors;assert f.lookupRequests.empty;assert f.tables['mantle.account.payment.Payment'].empty
 }
-check('verified hint replay retains a single canonical payment'){
- def f=fixture('found');run(f,[lookupMode:'routine',transId:'123456789']);run(f,[lookupMode:'routine',transId:'123456789']);assert f.tables['mantle.account.payment.Payment'].size()==1
+check('repeated routine confirmation retains a single canonical payment'){
+ def f=fixture('found');run(f,[lookupMode:'routine']);run(f,[lookupMode:'routine']);run(f,[lookupMode:'routine',transId:'123456789']);assert f.tables['mantle.account.payment.Payment'].size()==1
 }
 check('full recovery safety caps include every page and still return uncertainty'){
- def f=fixture('cap');def r=run(f,[lookupMode:'recovery']);assert !r.authorized;assert !r.transactionHint
+ def f=fixture('cap');def r=run(f,[lookupMode:'recovery']);assert !r.authorized
  assert f.lookupRequests.size()==41;assert r.gatewayCallCount==41;assert f.tables['mantle.account.payment.Payment'].empty
 }
 println "Hosted lookup: ${passed} passed, ${failures.size()} failed";assert failures.empty:failures
