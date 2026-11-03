@@ -60,14 +60,14 @@ No schema or card-snapshot policy is introduced here.
 
 Tests compile the actual production confirmation XML and actual Mantle
 create#Payment/set#PaymentAutoInfo with the pinned framework template. They use
-the real HostedHttp XML parser and an in-process JDK HTTP stub which accepts only
-a synthetic transaction-details request at example.invalid. Nothing contacts a
+the real HostedHttp XML parser and an in-process JDK HTTP stub restricted to
+synthetic reporting list/batch/details requests at example.invalid. Nothing contacts a
 gateway, merchant, database or mail system. New cases cover approved statuses,
 optional-code validation, declined/held/unknown and mismatched binding denials,
 caller metadata rejection, replay, historical records and unexpected card data.
 Inherited instrument and profile-owner/transport tests remain included.
 
-The standalone CI uses only pinned public framework/USL/UDM inputs and the generic
+Main's hosted-lookup-check CI uses only pinned public framework/USL/UDM inputs and the generic
 test-only XML harness in this repository. Local verification reuses existing
 compiled framework/jars without installing or building dependencies. Facade tests
 do not establish live authorization, real JTA concurrency, merchant behavior or
@@ -78,3 +78,38 @@ Rod source review, the separate masked-card placement decision and separately
 authorized synthetic deployment/log/persistence acceptance remain open. No merge,
 submodule pin change, deployment or live financial operation is authorized by
 this source PR.
+
+## GH148 composition on current main
+
+The refreshed base is vendor b47c206: routine invoice matches verify in the same
+invocation, not the retired client-hint round trip. Metadata adds no transport.
+
+| Route | Exact external request sequence | Result |
+|---|---|---|
+| Routine no match | unsettled list | uncertain, no payment/response |
+| Routine match | unsettled list, details | verified new payment + permitted metadata |
+| Supplied transaction ID | details | same binding guards + permitted metadata |
+| Manual later page | unsettled page1, page2, details | verified new payment + metadata |
+| Manual settled | unsettled, settled batches, batch transactions, details | verified new payment + metadata |
+| Cross-route replay | route's unchanged1/2requests | one canonical payment/response; original metadata preserved |
+| Historical rows | routine list+details | accepted rows preserved; existing Promised advancement retained; no metadata backfill |
+
+The composed suite checks request sequence/count, financial outcome and stored
+fields together, including caller injection, status/invoice/amount refusal and
+missing/malformed/duplicate/nested optional values. Even transactionStatus must
+be a single text-only leaf to enter the diagnostic snapshot; omitting malformed
+optional metadata does not change the existing financial status decision.
+
+The runner defaults to instrument13 +metadata56 +lookup15 +composed30 cases;
+profile/HTTP54 cases remain a separate command in the same main workflow:168total.
+All8vendor XML files parse. The redundant candidate-only workflow is removed;
+main-push/PR triggers and public dependency pins are retained.
+
+Entity-write fixtures load field names from actual pinned UDM definitions.
+Payment context filtering follows the entity schema, and response/update writes
+reject unknown columns before storage; an unknown-field negative control proves
+this boundary. This is schema-name validation with map-backed persistence, not
+real EntityFacade type coercion, FK, transaction rollback, JTA or concurrency proof.
+The earlier isolated PostgreSQL composed fixture is preserved, but local Docker/
+test DB is unavailable and its old hint-flow receipts do not prove this change.
+No new integration project, parent pin or deployment is included.

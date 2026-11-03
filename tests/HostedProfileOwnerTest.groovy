@@ -319,7 +319,11 @@ check('hosted token mint parses a byte-order-mark response from the real gateway
     boolean rejected=false
     try{operation=='mint' ? f.mint() : f.run('confirm','HostedTransaction',[transId:'789'])}
     catch(Exception error){rejected=error.message=='Invalid payment gateway response'&&error.cause==null}
-    assert rejected&&f.writes==0&&f.logs.empty
+    assert rejected && f.writes == 0
+    // GH148 adds only a fixed allowlisted call-count diagnostic; parser body,
+    // credentials and transaction identifiers must still never reach logs.
+    assert f.logs == (operation == 'confirm' ? ['info', 'HOSTED_CONFIRM_GATEWAY_CALL mode=recovery operation=details call_count=1', null] : [])
+    assert !f.logs.toString().contains('PRIVATE_RESPONSE_SENTINEL')
 }}
 println "Hosted profile ownership: ${passed} passed, ${failures.size()} failed"
 assert failures.empty:failures.join('; ')

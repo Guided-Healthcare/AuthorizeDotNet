@@ -1,7 +1,15 @@
-name: Isolated hosted confirmation and profile checks
+name: Isolated hosted instrument, metadata, lookup and profile checks
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'service/AuthorizeDotNet/HostedServices.xml'
+      - 'service/AuthorizeDotNet/HostedProfileServices.groovy'
+      - 'service/AuthorizeDotNet/HostedHttp.groovy'
+      - 'tests/**'
+      - '.github/workflows/hosted-lookup-check.yml'
   pull_request:
     branches: [main]
     paths:
@@ -9,7 +17,7 @@ on:
       - 'service/AuthorizeDotNet/HostedProfileServices.groovy'
       - 'service/AuthorizeDotNet/HostedHttp.groovy'
       - 'tests/**'
-      - '.github/workflows/hosted-confirmation-check.yml'
+      - '.github/workflows/hosted-lookup-check.yml'
 
 permissions:
   contents: read
@@ -47,7 +55,7 @@ jobs:
       - name: Compile the pinned public framework
         working-directory: .codex-work/moqui
         run: ./gradlew --no-daemon :framework:jar
-      - name: Verify confirmation, metadata and inherited profile boundaries without network transport
+      - name: Verify combined instrument, metadata, lookup and profile boundaries offline
         env:
           MOQUI_FRAMEWORK_ROOT: ${{ github.workspace }}/.codex-work/moqui/framework
           XML_SERVICE_HARNESS: ${{ github.workspace }}/tests/support/XmlServiceHarness.groovy
@@ -56,3 +64,4 @@ jobs:
         run: |
           python3 tests/run-hosted-payment-instrument-tests.py
           python3 tests/run-hosted-profile-owner-tests.py
+          python3 -c "from pathlib import Path; import xml.etree.ElementTree as E; files=[p for root in ('service','entity','data') for p in Path(root).rglob('*.xml')]; [E.parse(p) for p in files]; print('Vendor XML parsed:',len(files))"
