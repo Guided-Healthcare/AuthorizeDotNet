@@ -26,8 +26,9 @@ Use existing cached dependencies only:
 
 ```sh
 export MOQUI_FRAMEWORK_ROOT=/absolute/path/to/um-moqui-app/framework/framework
-export XML_SERVICE_HARNESS=/absolute/path/to/um-moqui/tests/support/XmlServiceHarness.groovy
+export XML_SERVICE_HARNESS="$PWD/tests/support/XmlServiceHarness.groovy"
 export MANTLE_USL_ROOT=/absolute/path/to/mantle-usl
+export MANTLE_UDM_ROOT=/absolute/path/to/mantle-udm
 python3 tests/run-hosted-payment-instrument-tests.py
 python3 tests/run-hosted-profile-owner-tests.py
 ```
@@ -52,3 +53,7 @@ Keep both original regression assertions enabled and preserve the red receipt.
 Root reviews the candidate source and exact test evidence before main merge.
 Staging receivers must remain held for integration; no financial deployment is
 accepted by these isolated tests. Historical reconciliation remains separate.
+
+The payment runner now also runs the GH-130 metadata suite by default. A standalone generic XML compiler harness is available at tests/support/XmlServiceHarness.groovy; XML_SERVICE_HARNESS may point there. See guidance/hosted-confirmation-metadata.md for the exact mapping, exclusion rules and remaining card-snapshot decision.
+
+Current default runner combines instrument, metadata, lookup and composed metadata/lookup suites. Use MANTLE_UDM_ROOT at the pinned a7126b8 definitions for strict response/update field validation. Main hosted-lookup-check.yml also retains the profile/HTTP suite and XML parse check; no duplicate candidate workflow remains. See guidance/hosted-confirmation-metadata.md for the per-route request budget and persistence limitations.

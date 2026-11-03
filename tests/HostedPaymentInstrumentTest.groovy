@@ -148,15 +148,33 @@ class InstrumentFixture {
             case 'mantle.account.PaymentServices.set#PaymentAutoInfo':return run(MANTLE,'set','PaymentAutoInfo',input)
             case 'create#mantle.account.payment.Payment':
                 assert events.contains('lock:mantle.order.OrderHeader')
-                Map row=input.findAll{k,v->k in ['orderId','orderPartSeqId','paymentTypeEnumId','statusId','paymentInstrumentEnumId','paymentMethodId','amount','amountUomId','fromPartyId','toPartyId','paymentRefNum','effectiveDate','paymentGatewayConfigId']}
+                // The real auto-service filters its context to entity fields.
+                Map row=input.findAll{k,v->writeFields('mantle.account.payment.Payment').contains(k)}
+                validateWrite('mantle.account.payment.Payment',row)
                 row.paymentId='synthetic-payment';tables['mantle.account.payment.Payment']<<row
                 return [paymentId:row.paymentId]
             case 'update#mantle.account.payment.Payment':
+                validateWrite('mantle.account.payment.Payment',input)
                 tables['mantle.account.payment.Payment'].find{it.paymentId==input.paymentId}.putAll(input);return [:]
             case 'create#mantle.account.method.PaymentGatewayResponse':
+                validateWrite('mantle.account.method.PaymentGatewayResponse',input)
                 tables['mantle.account.method.PaymentGatewayResponse']<<new LinkedHashMap(input);return [:]
             default:throw new AssertionError('Unexpected service boundary: '+service)
         }
+    }
+    static final Map<String,Set<String>> WRITE_FIELDS = [:]
+    Set<String> writeFields(String entity) {
+        if (!WRITE_FIELDS.containsKey(entity)) {
+            def schema=MNode.parse(new File(System.getenv('MANTLE_UDM_ROOT')+'/entity/AccountingAccountEntities.xml'))
+            def definition=schema.children('entity').find { it.attribute('package')+'.'+it.attribute('entity-name')==entity }
+            assert definition: 'Missing pinned entity '+entity
+            WRITE_FIELDS[entity]=definition.children('field').collect { it.attribute('name') } as Set
+        }
+        WRITE_FIELDS[entity]
+    }
+    void validateWrite(String entity, Map fields) {
+        def unknown=fields.keySet().findAll { !writeFields(entity).contains(it) }
+        assert unknown.empty: 'Unknown pinned entity fields: '+unknown
     }
     Map payment(){tables['mantle.account.payment.Payment'][0]}
 }

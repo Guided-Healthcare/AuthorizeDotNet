@@ -308,6 +308,7 @@ along with this software (see the LICENSE.md file). If not, see
                 boundOk = false
                 txnInvoice = null
                 txnAmountStr = null
+                hostedPaymentMetadata = [:]
                 if ('Ok'.equalsIgnoreCase(rc ?: '')) {
                     def txn = responseNode.transaction
                     if (txn != null && txn.size() > 0) {
@@ -316,6 +317,26 @@ along with this software (see the LICENSE.md file). If not, see
                         txnOk = true
                         authorized = (responseReason == '1') &&
                             (['authorizedPendingCapture','capturedPendingSettlement','settledSuccessfully'].contains(txnStatus))
+                        // Optional, server-derived response codes only. Never copy payment/card
+                        // subtrees, raw responses or caller metadata into a financial record.
+                        if (authorized) {
+                            def codeText = { nodes ->
+                                nodes.size() == 1 && nodes[0].children().every { it instanceof String }
+                                        ? nodes[0].text() : null
+                            }
+                            def approval = codeText(txn.authCode)
+                            def avs = codeText(txn.AVSResponse)
+                            def cv = codeText(txn.cardCodeResponse)
+                            def status = codeText(txn.transactionStatus)
+                            if (status in ['authorizedPendingCapture','capturedPendingSettlement','settledSuccessfully'])
+                                hostedPaymentMetadata.transactionStatus = status
+                            if (approval != null && approval ==~ /[A-Za-z0-9]{6}/)
+                                hostedPaymentMetadata.approvalCode = approval
+                            if (avs in ['A','B','E','G','N','P','R','S','U','W','X','Y','Z'])
+                                hostedPaymentMetadata.avsResult = avs
+                            if (cv in ['M','N','P','S','U'])
+                                hostedPaymentMetadata.cvResult = cv
+                        }
                         def prof = txn.profile
                         if (prof != null && prof.size() > 0) returnedCustomerProfileId = prof.customerProfileId.text()
                         // Binding fields: the gateway transaction's own invoice + settled/auth amount.
@@ -407,6 +428,7 @@ along with this software (see the LICENSE.md file). If not, see
                 </entity-find-one>
                 <set field="vendorPartyId" from="prodStore?.organizationPartyId"/>
             </if>
+            <set field="newHostedPayment" from="false"/>
             <if condition="payments"><then>
                 <set field="pmt" from="payments[0]"/>
                 <!-- Advance an existing payment to Delivered if not already in an accepted status. -->
@@ -423,8 +445,10 @@ along with this software (see the LICENSE.md file). If not, see
                                  amount:orderHeader.grandTotal, amountUomId:orderHeader.currencyUomId,
                                  fromPartyId:customerPartyId, toPartyId:vendorPartyId,
                                  paymentRefNum:transId, effectiveDate:ec.user.nowTimestamp,
+                                 paymentAuthCode:hostedPaymentMetadata.approvalCode,
                                  paymentGatewayConfigId:paymentGatewayConfigId]"/>
                 <set field="paidPaymentId" from="createPmtOut.paymentId"/>
+                <set field="newHostedPayment" from="!!createPmtOut.paymentId"/>
             </else></if>
             <if condition="paidPaymentId">
                 <!-- Record a gateway response once (skip if one already exists for this transId). -->
@@ -438,7 +462,7 @@ along with this software (see the LICENSE.md file). If not, see
                                      paymentId:paidPaymentId, amountUomId:orderHeader.currencyUomId,
                                      amount:orderHeader.grandTotal, referenceNum:transId,
                                      transactionDate:ec.user.nowTimestamp, resultSuccess:'Y', resultError:'N',
-                                     responseCode:responseReason]"/>
+                                     responseCode:responseReason] + (newHostedPayment ? hostedPaymentMetadata : [:])"/>
                 </if>
                 <set field="paymentId" from="paidPaymentId"/>
                 <entity-find-one entity-name="mantle.account.payment.Payment" value-field="pmtNow">
