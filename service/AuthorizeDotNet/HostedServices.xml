@@ -127,8 +127,8 @@ along with this software (see the LICENSE.md file). If not, see
         <setting><settingName>hostedPaymentReturnOptions</settingName><settingValue>{"showReceipt": false}</settingValue></setting>
         <setting><settingName>hostedPaymentButtonOptions</settingName><settingValue>{"text": "Pay"}</settingValue></setting>
         <setting><settingName>hostedPaymentStyleOptions</settingName><settingValue>{"bgColor": "#1f2933"}</settingValue></setting>
-        <setting><settingName>hostedPaymentPaymentOptions</settingName><settingValue>{"showCreditCard": true, "showBankAccount": false}</settingValue></setting>
-        <setting><settingName>hostedPaymentBillingAddressOptions</settingName><settingValue>{"show": true, "required": false}</settingValue></setting>
+        <setting><settingName>hostedPaymentPaymentOptions</settingName><settingValue>{"cardCodeRequired": true, "showCreditCard": true, "showBankAccount": false}</settingValue></setting>
+        <setting><settingName>hostedPaymentBillingAddressOptions</settingName><settingValue>{"show": true, "required": true}</settingValue></setting>
         <setting><settingName>hostedPaymentCustomerOptions</settingName><settingValue>{"showEmail": false, "addPaymentProfile": true}</settingValue></setting>
         <setting><settingName>hostedPaymentOrderOptions</settingName><settingValue>{"show": false}</settingValue></setting>
         <setting><settingName>hostedPaymentIFrameCommunicatorUrl</settingName><settingValue>{"url": "${iframeCommunicatorUrl}"}</settingValue></setting>
