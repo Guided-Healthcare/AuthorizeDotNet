@@ -149,6 +149,146 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <!-- Read-only. Lists every gateway transaction whose invoice is this order's invoice ("orderId" or a
+         later attempt's "orderId-N") with a safe class: success | negative | uncertain. Writes nothing.
+         scanComplete is true ONLY when the unsettled list AND the recent settled batches were read to the
+         end with no gateway error and no safety cap hit; anything less is incomplete and must never be
+         treated as "no charge exists". routine reads one unsettled page and is never complete.
+         stopOnSuccess ends the scan at the first successful charge (cheaper; not exhaustive). -->
+    <service verb="inspect" noun="HostedInvoiceActivity">
+        <in-parameters>
+            <parameter name="orderId" required="true"/>
+            <parameter name="lookupMode" default-value="recovery"/>
+            <parameter name="stopOnSuccess" type="Boolean" default-value="false"/>
+            <parameter name="paymentGatewayConfigId"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="activity" type="List"/>
+            <parameter name="successTransIds" type="List"/>
+            <parameter name="hasUncertain" type="Boolean"/>
+            <parameter name="scanComplete" type="Boolean"/>
+            <parameter name="gatewayCallCount" type="Integer"/>
+        </out-parameters>
+        <actions>
+            <set field="gatewayCallCount" from="0"/>
+            <set field="scanComplete" from="false"/>
+            <set field="lookupMode" from="lookupMode ?: 'recovery'"/>
+            <if condition="!(lookupMode in ['routine','recovery'])"><return error="true" message="Invalid payment lookup mode."/></if>
+            <service-call name="AuthorizeDotNet.CimServices.get#PaymentGatewayConfig"
+                    in-map="[paymentGatewayConfigId:paymentGatewayConfigId]" out-map="gwOut"/>
+            <set field="paymentGatewayConfigId" from="gwOut.paymentGatewayConfigId ?: paymentGatewayConfigId"/>
+            <if condition="!paymentGatewayConfigId">
+                <set field="paymentGatewayConfigId" from="ec.user.getPreference('AuthorizeNetCimPaymentGatewayConfigId')"/>
+            </if>
+            <entity-find-one entity-name="AuthorizeDotNet.PaymentGatewayAuthorizeNet" value-field="pgan"/>
+            <if condition="pgan == null"><return error="true" message="Gateway ${paymentGatewayConfigId} not found."/></if>
+            <script><![CDATA[
+                def anetUrl = pgan.transactionUrl
+                def login = pgan.login
+                def tranKey = pgan.tranKey
+                def want = orderId.toString()
+                def successSet = ['authorizedPendingCapture','capturedPendingSettlement','settledSuccessfully'] as Set
+                def negativeSet = ['declined','generalError','communicationError','voided','expired','failedReview'] as Set
+                def belongs = { String inv -> inv != null && (inv == want ||
+                        (inv.startsWith(want + '-') && inv.substring(want.length() + 1) ==~ /\d{1,3}/)) }
+                def classify = { String st -> successSet.contains(st) ? 'success' : (negativeSet.contains(st) ? 'negative' : 'uncertain') }
+                def rowsById = new LinkedHashMap()
+                def collect = { txns ->
+                    txns.each { t ->
+                        def inv = t.invoiceNumber.text()
+                        if (!belongs(inv)) return
+                        def st = t.transactionStatus.text()
+                        rowsById[t.transId.text()] = [transId: t.transId.text(), invoiceNumber: inv, status: st ?: null,
+                                submitTimeUTC: t.submitTimeUTC.text() ?: null, cls: classify(st)]
+                    }
+                }
+                def haveSuccess = { rowsById.values().any { it.cls == 'success' } }
+                def complete = (lookupMode != 'routine')
+                def pageLimit = 1000
+                def hardCap = 20000  // safety ceiling; hitting it makes the scan incomplete
+                def run = { String xml -> ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'parseHostedXml',
+                        [xmlPayload: ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'postHostedXml', [targetUrl:anetUrl, xmlPayload:xml])]) }
+                def ok = { node -> 'Ok'.equalsIgnoreCase(node.messages?.resultCode?.text() ?: '') }
+
+                // --- 1) Unsettled list, paginated. Routine reads exactly one page. ---
+                def offset = 1
+                def scanned = 0
+                def stop = false
+                while (!stop && scanned < hardCap && (lookupMode != 'routine' || gatewayCallCount == 0)) {
+                    def listReq = """<?xml version="1.0" encoding="utf-8"?>
+<getUnsettledTransactionListRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
+    <merchantAuthentication><name>${encodeForXmlAttribute(login)}</name><transactionKey>${encodeForXmlAttribute(tranKey)}</transactionKey></merchantAuthentication>
+    <sorting><orderBy>submitTimeUTC</orderBy><orderDescending>true</orderDescending></sorting>
+    <paging><limit>${pageLimit}</limit><offset>${offset}</offset></paging>
+</getUnsettledTransactionListRequest>"""
+                    gatewayCallCount++
+                    ec.logger.log('info', "HOSTED_CONFIRM_GATEWAY_CALL mode=${lookupMode} operation=unsettled call_count=${gatewayCallCount}", null)
+                    def listNode = run(listReq)
+                    if (!ok(listNode)) { complete = false; break }
+                    def txns = listNode.transactions.transaction
+                    collect(txns)
+                    def total = (listNode.totalNumInResultSet?.text() ?: '0') as Integer
+                    scanned += txns.size()
+                    if (stopOnSuccess && haveSuccess()) { stop = true; complete = false; break }
+                    if (txns.size() < pageLimit || scanned >= total) break
+                    if (scanned >= hardCap) { complete = false; break }
+                    offset += pageLimit
+                }
+
+                // --- 2) Recent settled batches (recovery only; skipped once a success ends a stopOnSuccess scan). ---
+                if (lookupMode != 'routine' && !stop && !(stopOnSuccess && haveSuccess())) {
+                    def nowUtc = java.time.Instant.now()
+                    def firstUtc = nowUtc.minus(java.time.Duration.ofDays(30))
+                    def fmt = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(java.time.ZoneOffset.UTC)
+                    def batchReq = """<?xml version="1.0" encoding="utf-8"?>
+<getSettledBatchListRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
+    <merchantAuthentication><name>${encodeForXmlAttribute(login)}</name><transactionKey>${encodeForXmlAttribute(tranKey)}</transactionKey></merchantAuthentication>
+    <firstSettlementDate>${fmt.format(firstUtc)}</firstSettlementDate>
+    <lastSettlementDate>${fmt.format(nowUtc)}</lastSettlementDate>
+</getSettledBatchListRequest>"""
+                    gatewayCallCount++
+                    ec.logger.log('info', "HOSTED_CONFIRM_GATEWAY_CALL mode=${lookupMode} operation=settled_batches call_count=${gatewayCallCount}", null)
+                    def batchNode = run(batchReq)
+                    if (!ok(batchNode)) { complete = false }
+                    else {
+                        def batchIds = batchNode.batchList.batch.collect { it.batchId.text() }
+                        for (bid in batchIds.reverse()) {
+                            if (stopOnSuccess && haveSuccess()) { complete = false; break }
+                            def boff = 1
+                            def bscanned = 0
+                            while (true) {
+                                def tlReq = """<?xml version="1.0" encoding="utf-8"?>
+<getTransactionListRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
+    <merchantAuthentication><name>${encodeForXmlAttribute(login)}</name><transactionKey>${encodeForXmlAttribute(tranKey)}</transactionKey></merchantAuthentication>
+    <batchId>${encodeForXmlAttribute(bid)}</batchId>
+    <sorting><orderBy>submitTimeUTC</orderBy><orderDescending>true</orderDescending></sorting>
+    <paging><limit>${pageLimit}</limit><offset>${boff}</offset></paging>
+</getTransactionListRequest>"""
+                                gatewayCallCount++
+                                ec.logger.log('info', "HOSTED_CONFIRM_GATEWAY_CALL mode=${lookupMode} operation=settled_transactions call_count=${gatewayCallCount}", null)
+                                def tlNode = run(tlReq)
+                                if (!ok(tlNode)) { complete = false; break }
+                                def btxns = tlNode.transactions.transaction
+                                collect(btxns)
+                                def btotal = (tlNode.totalNumInResultSet?.text() ?: '0') as Integer
+                                bscanned += btxns.size()
+                                if (stopOnSuccess && haveSuccess()) { complete = false; break }
+                                if (btxns.size() < pageLimit || bscanned >= btotal) break
+                                if (bscanned >= hardCap) { complete = false; break }
+                                boff += pageLimit
+                            }
+                        }
+                    }
+                }
+
+                scanComplete = complete
+                activity = rowsById.values().sort { a, b -> (a.submitTimeUTC ?: '') <=> (b.submitTimeUTC ?: '') } as List
+                successTransIds = activity.findAll { it.cls == 'success' }.collect { it.transId }
+                hasUncertain = activity.any { it.cls == 'uncertain' }
+            ]]></script>
+        </actions>
+    </service>
+
     <!-- Confirm an Accept Hosted transaction authoritatively from the gateway and record the
          authorized Payment against the order. Called after the browser relays action=transactResponse.
          We re-fetch details from Authorize.Net (getTransactionDetails) rather than trusting the
@@ -202,87 +342,15 @@ along with this software (see the LICENSE.md file). If not, see
                  so we fall back to the settled transactions in recent batches. Without this fallback
                  a real charge orphans the order permanently. -->
             <if condition="!transId">
-                <script><![CDATA[
-                    def anetUrl = pgan.transactionUrl
-                    def login = pgan.login
-                    def tranKey = pgan.tranKey
-                    def wantInvoice = orderId.toString()
-
-                    // --- 1) Unsettled list, paginated (limit 1000/page; API max offset is high). ---
-                    transId = null
-                    def pageLimit = 1000
-                    def offset = 1
-                    def scanned = 0
-                    def hardCap = 20000  // safety ceiling; avoid unbounded scan on a huge backlog
-                    while (transId == null && scanned < hardCap && (lookupMode != 'routine' || gatewayCallCount == 0)) {
-                        def listReq = """<?xml version="1.0" encoding="utf-8"?>
-<getUnsettledTransactionListRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
-    <merchantAuthentication><name>${encodeForXmlAttribute(login)}</name><transactionKey>${encodeForXmlAttribute(tranKey)}</transactionKey></merchantAuthentication>
-    <sorting><orderBy>submitTimeUTC</orderBy><orderDescending>true</orderDescending></sorting>
-    <paging><limit>${pageLimit}</limit><offset>${offset}</offset></paging>
-</getUnsettledTransactionListRequest>"""
-                        gatewayCallCount++
-                        ec.logger.log('info', "HOSTED_CONFIRM_GATEWAY_CALL mode=${lookupMode} operation=unsettled call_count=${gatewayCallCount}", null)
-                        def listResp = ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'postHostedXml', [targetUrl:anetUrl,xmlPayload:listReq])
-                        def listNode = ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'parseHostedXml', [xmlPayload:listResp])
-                        if (!'Ok'.equalsIgnoreCase(listNode.messages?.resultCode?.text() ?: '')) break
-                        def txns = listNode.transactions.transaction
-                        def match = txns.find { it.invoiceNumber.text() == wantInvoice }
-                        if (match != null) { transId = match.transId.text() }
-                        def total = (listNode.totalNumInResultSet?.text() ?: '0') as Integer
-                        scanned += txns.size()
-                        if (txns.size() < pageLimit || scanned >= total) break
-                        offset += pageLimit
-                    }
-
-                    // --- 2) Settled fallback: scan recent settled batches for our invoiceNumber. ---
-                    if (transId == null && lookupMode != 'routine') {
-                        // Look back a bounded window of settlement batches.
-                        def nowUtc = java.time.Instant.now()
-                        def firstUtc = nowUtc.minus(java.time.Duration.ofDays(30))
-                        def fmt = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(java.time.ZoneOffset.UTC)
-                        def batchReq = """<?xml version="1.0" encoding="utf-8"?>
-<getSettledBatchListRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
-    <merchantAuthentication><name>${encodeForXmlAttribute(login)}</name><transactionKey>${encodeForXmlAttribute(tranKey)}</transactionKey></merchantAuthentication>
-    <firstSettlementDate>${fmt.format(firstUtc)}</firstSettlementDate>
-    <lastSettlementDate>${fmt.format(nowUtc)}</lastSettlementDate>
-</getSettledBatchListRequest>"""
-                        gatewayCallCount++
-                        ec.logger.log('info', "HOSTED_CONFIRM_GATEWAY_CALL mode=${lookupMode} operation=settled_batches call_count=${gatewayCallCount}", null)
-                        def batchResp = ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'postHostedXml', [targetUrl:anetUrl,xmlPayload:batchReq])
-                        def batchNode = ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'parseHostedXml', [xmlPayload:batchResp])
-                        if ('Ok'.equalsIgnoreCase(batchNode.messages?.resultCode?.text() ?: '')) {
-                            def batchIds = batchNode.batchList.batch.collect { it.batchId.text() }
-                            // Most recent batches first.
-                            for (bid in batchIds.reverse()) {
-                                if (transId != null) break
-                                def boff = 1
-                                def bscanned = 0
-                                while (transId == null && bscanned < hardCap) {
-                                    def tlReq = """<?xml version="1.0" encoding="utf-8"?>
-<getTransactionListRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
-    <merchantAuthentication><name>${encodeForXmlAttribute(login)}</name><transactionKey>${encodeForXmlAttribute(tranKey)}</transactionKey></merchantAuthentication>
-    <batchId>${encodeForXmlAttribute(bid)}</batchId>
-    <sorting><orderBy>submitTimeUTC</orderBy><orderDescending>true</orderDescending></sorting>
-    <paging><limit>${pageLimit}</limit><offset>${boff}</offset></paging>
-</getTransactionListRequest>"""
-                                    gatewayCallCount++
-                                    ec.logger.log('info', "HOSTED_CONFIRM_GATEWAY_CALL mode=${lookupMode} operation=settled_transactions call_count=${gatewayCallCount}", null)
-                                    def tlResp = ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'postHostedXml', [targetUrl:anetUrl,xmlPayload:tlReq])
-                                    def tlNode = ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'parseHostedXml', [xmlPayload:tlResp])
-                                    if (!'Ok'.equalsIgnoreCase(tlNode.messages?.resultCode?.text() ?: '')) break
-                                    def btxns = tlNode.transactions.transaction
-                                    def bmatch = btxns.find { it.invoiceNumber.text() == wantInvoice }
-                                    if (bmatch != null) { transId = bmatch.transId.text() }
-                                    def btotal = (tlNode.totalNumInResultSet?.text() ?: '0') as Integer
-                                    bscanned += btxns.size()
-                                    if (btxns.size() < pageLimit || bscanned >= btotal) break
-                                    boff += pageLimit
-                                }
-                            }
-                        }
-                    }
-                ]]></script>
+                <!-- Read-only scan of EVERY gateway transaction for this order's invoice(s). Prefer a
+                     successful charge; otherwise take an uncertain one (no/unknown status) so the
+                     authoritative details call below decides. Negative-only results are never bound. -->
+                <service-call name="AuthorizeDotNet.HostedServices.inspect#HostedInvoiceActivity"
+                        in-map="[orderId:orderId, lookupMode:lookupMode, stopOnSuccess:true, paymentGatewayConfigId:paymentGatewayConfigId]"
+                        out-map="activityOut"/>
+                <set field="gatewayCallCount" from="activityOut.gatewayCallCount"/>
+                <set field="transId" from="activityOut.successTransIds ? activityOut.successTransIds[0]
+                        : activityOut.activity?.find { it.cls == 'uncertain' }?.transId"/>
                 <if condition="!transId">
                     <log level="info" message="HOSTED_CONFIRM_UNCERTAIN mode=${lookupMode} gateway_calls=${gatewayCallCount}"/>
                     <return/><!-- not charged yet; caller polls again -->
@@ -365,11 +433,14 @@ along with this software (see the LICENSE.md file). If not, see
                  binding an unrelated charge. Currency: Authorize.Net settles in the merchant account
                  currency; we assert amount equality rather than trust a field the API may omit. -->
             <set field="expectedInvoice" from="orderId.toString()"/>
-            <if condition="transIdFromClient &amp;&amp; txnInvoice != expectedInvoice">
+            <!-- GH-171: a later payment attempt on the same order carries invoice "orderId-N". -->
+            <set field="invoiceBelongs" from="txnInvoice != null &amp;&amp; (txnInvoice == expectedInvoice
+                    || (txnInvoice.startsWith(expectedInvoice + '-') &amp;&amp; txnInvoice.substring(expectedInvoice.length() + 1) ==~ /\d{1,3}/))"/>
+            <if condition="transIdFromClient &amp;&amp; !invoiceBelongs">
                 <log level="warn" message="confirm#HostedTransaction: client transId ${transId} invoiceNumber '${txnInvoice}' != order ${orderId}; refusing to bind."/>
                 <return error="true" type="danger" message="Payment could not be matched to this order."/>
             </if>
-            <if condition="txnInvoice &amp;&amp; txnInvoice != expectedInvoice">
+            <if condition="txnInvoice &amp;&amp; !invoiceBelongs">
                 <log level="warn" message="confirm#HostedTransaction: transId ${transId} invoiceNumber '${txnInvoice}' != order ${orderId}; refusing to bind."/>
                 <return error="true" type="danger" message="Payment could not be matched to this order."/>
             </if>

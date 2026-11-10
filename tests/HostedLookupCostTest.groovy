@@ -16,7 +16,7 @@ def fixture={String scenario->
   if(op.endsWith('getTransactionDetailsRequest'))return "<response><messages><resultCode>Ok</resultCode></messages><transaction><transactionType>authCaptureTransaction</transactionType><transactionStatus>settledSuccessfully</transactionStatus><responseCode>1</responseCode><order><invoiceNumber>${scenario=='foreign'?'foreign-order':'synthetic-order'}</invoiceNumber></order><settleAmount>75.00</settleAmount></transaction></response>"
   if(op.endsWith('getSettledBatchListRequest'))return '<response><messages><resultCode>Ok</resultCode></messages><batchList><batch><batchId>fixture-batch</batchId></batch></batchList></response>'
   boolean match=scenario in ['found','foreign'] || (scenario=='settled'&&op.endsWith('getTransactionListRequest')) || (scenario=='page-two'&&req.paging.offset.text()=='1001')
-  def rows=match?'<transaction><transId>123456789</transId><invoiceNumber>synthetic-order</invoiceNumber></transaction>':''
+  def rows=match?'<transaction><transId>123456789</transId><invoiceNumber>synthetic-order</invoiceNumber><transactionStatus>capturedPendingSettlement</transactionStatus></transaction>':''
   if(scenario=='cap'||(scenario=='page-two'&&req.paging.offset.text()!='1001'))rows=('<transaction><transId>999</transId><invoiceNumber>other</invoiceNumber></transaction>'*1000)
   "<response><messages><resultCode>Ok</resultCode></messages><totalNumInResultSet>${scenario=='cap'?20001:(scenario=='page-two'?1001:(match?1:0))}</totalNumInResultSet><transactions>${rows}</transactions></response>"
  }

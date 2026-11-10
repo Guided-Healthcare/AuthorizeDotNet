@@ -144,6 +144,7 @@ class InstrumentFixture {
         calls<<[service:service,input:new LinkedHashMap(input)];events<<service
         switch(service){
             case 'AuthorizeDotNet.CimServices.get#PaymentGatewayConfig':return [paymentGatewayConfigId:input.paymentGatewayConfigId]
+            case 'AuthorizeDotNet.HostedServices.inspect#HostedInvoiceActivity':return run(HOSTED,'inspect','HostedInvoiceActivity',input)
             case 'mantle.account.PaymentServices.create#Payment':return run(MANTLE,'create','Payment',input)
             case 'mantle.account.PaymentServices.set#PaymentAutoInfo':return run(MANTLE,'set','PaymentAutoInfo',input)
             case 'create#mantle.account.payment.Payment':
