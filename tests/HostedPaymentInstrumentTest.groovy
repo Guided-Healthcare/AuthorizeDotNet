@@ -87,7 +87,7 @@ class InstrumentFixture {
         'moqui.basic.Enumeration':[[enumId:'PiCreditCard',relatedEnumId:'PmtCreditCard']]
     ]
     List calls=[], events=[], errors=[]
-    String txnStatus='capturedPendingSettlement', invoice='synthetic-order', amount='75.00', reason='1'
+    String txnType='authCaptureTransaction', txnStatus='capturedPendingSettlement', invoice='synthetic-order', amount='75.00', reason='1'
     Map ec
     InstrumentFixture(){
         def factory=new EntityConditionFactoryImpl(null)
@@ -123,7 +123,7 @@ class InstrumentFixture {
             assert request.name().toString().endsWith('getTransactionDetailsRequest')
             assert request.transId.text()=='synthetic-transaction'
             events<<'isolated-details'
-            """<getTransactionDetailsResponse><messages><resultCode>Ok</resultCode></messages><transaction><transactionStatus>${txnStatus}</transactionStatus><responseCode>${reason}</responseCode><order><invoiceNumber>${invoice}</invoiceNumber></order><settleAmount>${amount}</settleAmount></transaction></getTransactionDetailsResponse>"""
+            """<getTransactionDetailsResponse><messages><resultCode>Ok</resultCode></messages><transaction><transactionType>${txnType}</transactionType><transactionStatus>${txnStatus}</transactionStatus><responseCode>${reason}</responseCode><order><invoiceNumber>${invoice}</invoiceNumber></order><settleAmount>${amount}</settleAmount></transaction></getTransactionDetailsResponse>"""
     }
     Map run(String file,String verb,String noun,Map input){
         def node=MNode.parse(new File(file)).children('service').find{it.attribute('verb')==verb&&it.attribute('noun')==noun}
@@ -198,7 +198,7 @@ check('retry reuses accepted payment without rewriting its historical instrument
     def f=new InstrumentFixture()
     Map historical=[paymentId:'historical-synthetic-payment',orderId:'synthetic-order',orderPartSeqId:'01',
         statusId:status,paymentInstrumentEnumId:'PiCompanyCheck',paymentMethodId:null,
-        amount:75G,amountUomId:'USD',paymentRefNum:'historical-synthetic-reference',
+        amount:75G,amountUomId:'USD',paymentRefNum:'synthetic-transaction',
         paymentGatewayConfigId:'historical-synthetic-gateway',effectiveDate:new java.sql.Timestamp(0)]
     f.tables['mantle.account.payment.Payment']<<new LinkedHashMap(historical)
     def result=f.confirm()
@@ -214,5 +214,36 @@ check('retry reuses accepted payment without rewriting its historical instrument
     f.confirm()
     assert f.tables['mantle.account.payment.Payment'].empty&&f.tables['mantle.account.method.PaymentGatewayResponse'].empty
 }}
+// GH-161: outcome, currency and single-use guards on the transId-bound path.
+['authOnlyTransaction','captureOnlyTransaction',''].each{type->check('GH-161: no payment write for transactionType "'+type+'"'){
+    def f=new InstrumentFixture();f.txnType=type;f.txnStatus='authorizedPendingCapture'
+    f.confirm()
+    assert f.tables['mantle.account.payment.Payment'].empty&&f.tables['mantle.account.method.PaymentGatewayResponse'].empty
+}}
+check('GH-161: no payment write for a non-USD order'){
+    def f=new InstrumentFixture();f.tables['mantle.order.OrderHeader'][0].currencyUomId='EUR'
+    f.confirm()
+    assert f.tables['mantle.account.payment.Payment'].empty
+}
+check('GH-161: transId already bound to another order is refused'){
+    def f=new InstrumentFixture()
+    f.tables['mantle.account.payment.Payment']<<[paymentId:'other-payment',orderId:'other-synthetic-order',orderPartSeqId:'01',statusId:'PmntDelivered',paymentRefNum:'synthetic-transaction',paymentGatewayConfigId:'synthetic-gateway']
+    f.confirm()
+    assert f.tables['mantle.account.payment.Payment'].size()==1&&f.tables['mantle.account.method.PaymentGatewayResponse'].empty
+}
+check('GH-161: a different transId on an already-paid order is not attached'){
+    def f=new InstrumentFixture()
+    Map paid=[paymentId:'paid-payment',orderId:'synthetic-order',orderPartSeqId:'01',statusId:'PmntDelivered',paymentRefNum:'earlier-transaction',amount:75G,amountUomId:'USD',paymentGatewayConfigId:'synthetic-gateway']
+    f.tables['mantle.account.payment.Payment']<<new LinkedHashMap(paid)
+    f.confirm()
+    assert f.payment()==paid&&f.tables['mantle.account.payment.Payment'].size()==1
+    assert f.tables['mantle.account.method.PaymentGatewayResponse'].empty
+}
+check('GH-161: an existing payment without a reference binds the confirmed transId'){
+    def f=new InstrumentFixture()
+    f.tables['mantle.account.payment.Payment']<<[paymentId:'pending-payment',orderId:'synthetic-order',orderPartSeqId:'01',statusId:'PmntPromised',paymentRefNum:null]
+    def result=f.confirm()
+    assert result.paymentId=='pending-payment'&&f.payment().paymentRefNum=='synthetic-transaction'&&f.payment().statusId=='PmntDelivered'
+}
 println "Hosted payment instrument: ${passed} passed, ${failures.size()} failed"
 assert failures.empty:failures.join('; ')

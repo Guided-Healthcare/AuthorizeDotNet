@@ -13,7 +13,7 @@ def fixture={String scenario->
   if(scenario=='http-error')throw new IOException('synthetic transport failure')
   if(scenario=='malformed')return '<broken'
   if(scenario=='gateway-error')return '<response><messages><resultCode>Error</resultCode></messages></response>'
-  if(op.endsWith('getTransactionDetailsRequest'))return "<response><messages><resultCode>Ok</resultCode></messages><transaction><transactionStatus>settledSuccessfully</transactionStatus><responseCode>1</responseCode><order><invoiceNumber>${scenario=='foreign'?'foreign-order':'synthetic-order'}</invoiceNumber></order><settleAmount>75.00</settleAmount></transaction></response>"
+  if(op.endsWith('getTransactionDetailsRequest'))return "<response><messages><resultCode>Ok</resultCode></messages><transaction><transactionType>authCaptureTransaction</transactionType><transactionStatus>settledSuccessfully</transactionStatus><responseCode>1</responseCode><order><invoiceNumber>${scenario=='foreign'?'foreign-order':'synthetic-order'}</invoiceNumber></order><settleAmount>75.00</settleAmount></transaction></response>"
   if(op.endsWith('getSettledBatchListRequest'))return '<response><messages><resultCode>Ok</resultCode></messages><batchList><batch><batchId>fixture-batch</batchId></batch></batchList></response>'
   boolean match=scenario in ['found','foreign'] || (scenario=='settled'&&op.endsWith('getTransactionListRequest')) || (scenario=='page-two'&&req.paging.offset.text()=='1001')
   def rows=match?'<transaction><transId>123456789</transId><invoiceNumber>synthetic-order</invoiceNumber></transaction>':''

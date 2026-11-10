@@ -308,6 +308,7 @@ along with this software (see the LICENSE.md file). If not, see
                 boundOk = false
                 txnInvoice = null
                 txnAmountStr = null
+                txnType = null
                 if ('Ok'.equalsIgnoreCase(rc ?: '')) {
                     def txn = responseNode.transaction
                     if (txn != null && txn.size() > 0) {
@@ -320,6 +321,7 @@ along with this software (see the LICENSE.md file). If not, see
                         if (prof != null && prof.size() > 0) returnedCustomerProfileId = prof.customerProfileId.text()
                         // Binding fields: the gateway transaction's own invoice + settled/auth amount.
                         txnInvoice = txn.order?.invoiceNumber?.text()
+                        txnType = txn.transactionType?.text()
                         txnAmountStr = (txn.settleAmount?.text() ?: txn.authAmount?.text() ?: txn.amount?.text())
                     }
                 }
@@ -329,6 +331,30 @@ along with this software (see the LICENSE.md file). If not, see
                 <return/>
             </if>
             <if condition="!authorized"><return/></if>
+
+            <!-- GH-161 outcome guard: our mint only requests authCaptureTransaction. An authorize-only
+                 (or any other type) transaction that matches the invoice and amount holds no funds for us,
+                 so it must never be recorded as a delivered payment. Fail closed on an absent type. -->
+            <if condition="txnType != 'authCaptureTransaction'">
+                <log level="warn" message="confirm#HostedTransaction: transId ${transId} transactionType '${txnType}' is not authCaptureTransaction; refusing to bind."/>
+                <return error="true" type="danger" message="Payment could not be matched to this order."/>
+            </if>
+            <!-- GH-161 currency guard: the gateway amount carries no currency. Hosted payments are USD-only
+                 (merchant account currency), so refuse to record a non-USD order against a gateway amount. -->
+            <if condition="orderHeader.currencyUomId != 'USD'">
+                <log level="warn" message="confirm#HostedTransaction: order ${orderId} currency '${orderHeader.currencyUomId}' is not USD; refusing to bind."/>
+                <return error="true" type="danger" message="Payment amount did not match this order."/>
+            </if>
+            <!-- GH-161 single-use guard: a gateway transaction may be bound to one order only. -->
+            <entity-find entity-name="mantle.account.payment.Payment" list="boundElsewhere">
+                <econdition field-name="paymentRefNum" from="transId"/>
+                <econdition field-name="paymentGatewayConfigId"/>
+                <econdition field-name="orderId" operator="not-equals"/>
+            </entity-find>
+            <if condition="boundElsewhere">
+                <log level="warn" message="confirm#HostedTransaction: transId ${transId} is already bound to another order; refusing to bind to ${orderId}."/>
+                <return error="true" type="danger" message="Payment could not be matched to this order."/>
+            </if>
 
             <!-- BINDING GUARD (defense against a mismatched/forged transId on the fast-path): the
                  gateway transaction MUST belong to THIS order and match its amount+currency before
@@ -409,6 +435,13 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
             <if condition="payments"><then>
                 <set field="pmt" from="payments[0]"/>
+                <!-- GH-161: an order already paid by a different gateway transaction is a second charge, not a
+                     retry. Never attach it to the existing Payment; surface it for manual reconciliation.
+                     A blank paymentRefNum (payment created before the charge) is still bound normally. -->
+                <if condition="pmt.paymentRefNum &amp;&amp; pmt.paymentRefNum != transId">
+                    <log level="warn" message="confirm#HostedTransaction: order ${orderId} already has payment ${pmt.paymentId} for a different transaction; transId ${transId} NOT attached (possible duplicate charge)."/>
+                    <return error="true" type="danger" message="Payment could not be matched to this order."/>
+                </if>
                 <!-- Advance an existing payment to Delivered if not already in an accepted status. -->
                 <if condition="!(pmt.statusId in ['PmntAuthorized','PmntDelivered','PmntConfirmed'])">
                     <service-call name="update#mantle.account.payment.Payment"
