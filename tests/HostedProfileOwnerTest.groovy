@@ -154,7 +154,7 @@ class ProfileFixture {
         node.first('out-parameters')?.children('parameter')?.collectEntries{[(it.attribute('name')):result[it.attribute('name')]]}?:[:]
     }
     Map ensure(){run()}
-    Map mint(){run('mint','HostedPaymentToken')}
+    Map mint(Map input=[:]){run('mint','HostedPaymentToken',input)}
 }
 int passed=0;List failures=[]
 def check={String name,Closure body->try{body();passed++;println 'PASS '+name}catch(Throwable error){failures<<name;println 'FAIL '+name+' ['+error.class.simpleName+': '+error.message+']'}}
@@ -325,5 +325,20 @@ check('hosted token mint parses a byte-order-mark response from the real gateway
     assert f.logs == (operation == 'confirm' ? ['info', 'HOSTED_CONFIRM_GATEWAY_CALL mode=recovery operation=details call_count=1', null] : [])
     assert !f.logs.toString().contains('PRIVATE_RESPONSE_SENTINEL')
 }}
+// GH-171: later hosted-form generations carry invoice "orderId-N"; nothing else may be billed.
+def mintTokenResponse={request,url->request.name().toString().endsWith('getCustomerProfileRequest') ? ProfileFixture.profile('patient','patient@example.invalid') : '<getHostedPaymentPageResponse xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd"><messages><resultCode>Ok</resultCode></messages><token>ISOLATED_TOKEN_SENTINEL</token></getHostedPaymentPageResponse>'}
+check('GH-171: default mint bills the order invoice'){
+    def f=new ProfileFixture();f.response=mintTokenResponse;assert f.mint().formToken=='ISOLATED_TOKEN_SENTINEL'
+    def page=f.requests.last().node;assert page.transactionRequest.order.invoiceNumber.text()=='order'&&page.refId.text()=='order'
+}
+check('GH-171: a later generation mints with invoice orderId-N'){
+    def f=new ProfileFixture();f.response=mintTokenResponse;assert f.mint([invoiceNumber:'order-2']).formToken=='ISOLATED_TOKEN_SENTINEL'
+    def page=f.requests.last().node;assert page.transactionRequest.order.invoiceNumber.text()=='order-2'&&page.refId.text()=='order-2'
+}
+['other-order','order-','order-x','order2','order-1234','order-2-3','xorder-2','ORDER-2'].each{inv->check('GH-171: mint refuses invoice '+inv+' before any gateway request'){
+    def f=new ProfileFixture();f.response=mintTokenResponse;def r=f.mint([invoiceNumber:inv])
+    assert !r.formToken&&f.errors;assert !f.requests.any{it.node.name().toString().endsWith('getHostedPaymentPageRequest')}
+}}
+
 println "Hosted profile ownership: ${passed} passed, ${failures.size()} failed"
 assert failures.empty:failures.join('; ')
