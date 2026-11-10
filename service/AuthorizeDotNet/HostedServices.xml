@@ -166,6 +166,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="orderId" required="true"/>
             <parameter name="lookupMode" default-value="recovery"/>
             <parameter name="stopOnSuccess" type="Boolean" default-value="false"/>
+            <parameter name="settledWindowDays" type="Integer" default-value="30"/>
             <parameter name="paymentGatewayConfigId"/>
         </in-parameters>
         <out-parameters>
@@ -244,7 +245,7 @@ along with this software (see the LICENSE.md file). If not, see
                 // --- 2) Recent settled batches (recovery only; skipped once a success ends a stopOnSuccess scan). ---
                 if (lookupMode != 'routine' && !stop && !(stopOnSuccess && haveSuccess())) {
                     def nowUtc = java.time.Instant.now()
-                    def firstUtc = nowUtc.minus(java.time.Duration.ofDays(30))
+                    def firstUtc = nowUtc.minus(java.time.Duration.ofDays(Math.max(1, Math.min(30, (settledWindowDays ?: 30) as int))))
                     def fmt = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(java.time.ZoneOffset.UTC)
                     def batchReq = """<?xml version="1.0" encoding="utf-8"?>
 <getSettledBatchListRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
@@ -291,6 +292,150 @@ along with this software (see the LICENSE.md file). If not, see
                 activity = rowsById.values().sort { a, b -> (a.submitTimeUTC ?: '') <=> (b.submitTimeUTC ?: '') } as List
                 successTransIds = activity.findAll { it.cls == 'success' }.collect { it.transId }
                 hasUncertain = activity.any { it.cls == 'uncertain' }
+            ]]></script>
+        </actions>
+    </service>
+
+    <!-- GH-171 safety net. An order is bound to exactly one gateway charge (its Payment). If a SECOND
+         successful charge for the same order's invoices exists (an old form that paid after a reissue), reverse
+         the extra: void while unsettled, refund once settled.
+
+         Never acts unless ALL hold: the order has exactly one distinct bound Payment transaction; a COMPLETE
+         gateway scan lists that same transaction as a success; the keeper and the extra both verify through
+         getTransactionDetails (authCapture, approved, order invoice, amount equal to the order total); the extra
+         is not bound to any Payment; and the extra was already observed by an EARLIER run at least two minutes ago
+         (two-scan agreement). Mode comes from preference HostedDuplicateChargeAction: off | dry-run | live
+         (anything else, or unset, is dry-run). dry-run records but never moves money. -->
+    <service verb="reconcile" noun="HostedDuplicateCharges">
+        <in-parameters>
+            <parameter name="orderId" required="true"/>
+            <parameter name="orderPartSeqId" default-value="01"/>
+            <parameter name="paymentGatewayConfigId"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="disposition"/>
+            <parameter name="duplicateCount" type="Integer"/>
+            <parameter name="actedCount" type="Integer"/>
+        </out-parameters>
+        <actions>
+            <set field="disposition" from="'none'"/>
+            <set field="duplicateCount" from="0"/>
+            <set field="actedCount" from="0"/>
+            <set field="mode" from="ec.user.getPreference('HostedDuplicateChargeAction')"/>
+            <set field="mode" from="mode in ['off', 'live', 'dry-run'] ? mode : 'dry-run'"/>
+            <if condition="mode == 'off'"><set field="disposition" from="'off'"/><return/></if>
+            <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader">
+                <field-map field-name="orderId"/>
+            </entity-find-one>
+            <if condition="orderHeader == null"><set field="disposition" from="'no-order'"/><return/></if>
+            <entity-find entity-name="mantle.account.payment.Payment" list="payments">
+                <econdition field-name="orderId"/>
+                <econdition field-name="orderPartSeqId"/>
+                <econdition field-name="statusId" operator="not-in" value="PmntCancelled,PmntVoid,PmntDeclined"/>
+            </entity-find>
+            <set field="keeperIds" from="payments.collect { it.paymentRefNum }.findAll { it }.unique()"/>
+            <if condition="keeperIds.size() != 1"><set field="disposition" from="'no-single-keeper'"/><return/></if>
+            <set field="keeperTransId" from="keeperIds[0].toString()"/>
+            <service-call name="AuthorizeDotNet.CimServices.get#PaymentGatewayConfig"
+                    in-map="[paymentGatewayConfigId:paymentGatewayConfigId]" out-map="gwOut"/>
+            <set field="paymentGatewayConfigId" from="gwOut.paymentGatewayConfigId ?: paymentGatewayConfigId"/>
+            <entity-find-one entity-name="AuthorizeDotNet.PaymentGatewayAuthorizeNet" value-field="pgan"/>
+            <if condition="pgan == null"><set field="disposition" from="'no-gateway'"/><return/></if>
+            <service-call name="AuthorizeDotNet.HostedServices.inspect#HostedInvoiceActivity"
+                    in-map="[orderId:orderId, lookupMode:'recovery', stopOnSuccess:false, settledWindowDays:3, paymentGatewayConfigId:paymentGatewayConfigId]"
+                    out-map="activityOut"/>
+            <if condition="activityOut.scanComplete != true"><set field="disposition" from="'scan-incomplete'"/><return/></if>
+            <if condition="!(keeperTransId in activityOut.successTransIds)"><set field="disposition" from="'keeper-not-in-scan'"/><return/></if>
+            <set field="extraIds" from="activityOut.successTransIds.findAll { it != keeperTransId }"/>
+            <if condition="!extraIds"><return/></if>
+            <set field="duplicateCount" from="extraIds.size()"/>
+            <set field="wantAmount" from="orderHeader.grandTotal != null ? new BigDecimal(orderHeader.grandTotal.toString()).setScale(2, java.math.RoundingMode.HALF_UP) : null"/>
+            <script><![CDATA[
+                def anetUrl = pgan.transactionUrl
+                def want = orderId.toString()
+                def successSet = ['authorizedPendingCapture','capturedPendingSettlement','settledSuccessfully'] as Set
+                def post = { String xml -> ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'parseHostedXml',
+                        [xmlPayload: ec.resource.script('component://AuthorizeDotNet/service/AuthorizeDotNet/HostedHttp.groovy', 'postHostedXml', [targetUrl:anetUrl, xmlPayload:xml])]) }
+                def auth = """<merchantAuthentication><name>${encodeForXmlAttribute(pgan.login)}</name><transactionKey>${encodeForXmlAttribute(pgan.tranKey)}</transactionKey></merchantAuthentication>"""
+                def details = { String tid ->
+                    def node = post("""<?xml version="1.0" encoding="utf-8"?>
+<getTransactionDetailsRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">${auth}<transId>${encodeForXmlAttribute(tid)}</transId></getTransactionDetailsRequest>""")
+                    def d = [good:false]
+                    if (!'Ok'.equalsIgnoreCase(node.messages?.resultCode?.text() ?: '')) return d
+                    def txn = node.transaction
+                    if (txn == null || txn.size() == 0) return d
+                    d.status = txn.transactionStatus.text()
+                    d.type = txn.transactionType.text()
+                    d.code = txn.responseCode.text()
+                    d.invoice = txn.order?.invoiceNumber?.text()
+                    try { d.amount = new BigDecimal(txn.settleAmount?.text() ?: txn.authAmount?.text() ?: txn.amount?.text()).setScale(2, java.math.RoundingMode.HALF_UP) } catch (Exception ignored) { d.amount = null }
+                    def card = txn.payment?.creditCard?.cardNumber?.text() ?: ''
+                    d.last4 = card.length() >= 4 ? card.substring(card.length() - 4) : null
+                    boolean invoiceOk = d.invoice != null && (d.invoice == want || (d.invoice.startsWith(want + '-') && d.invoice.substring(want.length() + 1) ==~ /\d{1,3}/))
+                    d.good = d.type == 'authCaptureTransaction' && d.code == '1' && successSet.contains(d.status) && invoiceOk &&
+                            d.amount != null && wantAmount != null && d.amount == wantAmount
+                    return d
+                }
+                def keeper = details(keeperTransId)
+                if (!keeper.good) { disposition = 'keeper-unverified' }
+                else {
+                    def now = ec.user.nowTimestamp
+                    def observed = 0, dry = 0, acted = 0
+                    for (tid in extraIds) {
+                        // A transaction that any Payment already references is not an unbound duplicate.
+                        if (ec.entity.find('mantle.account.payment.Payment').condition('paymentRefNum', tid).list()) continue
+                        def prior = ec.entity.find('AuthorizeDotNet.HostedDuplicateCharge').condition([orderId:orderId, transId:tid]).one()
+                        if (prior != null && prior.disposition in ['Voided','Refunded']) continue
+                        if (prior == null) {
+                            ec.service.sync().name('create#AuthorizeDotNet.HostedDuplicateCharge').parameters([orderId:orderId, transId:tid,
+                                    keeperTransId:keeperTransId, firstSeenDate:now, lastSeenDate:now, disposition:'Observed']).call()
+                            ec.logger.log('warn', "HOSTED_DUPLICATE_CHARGE_OBSERVED order=${orderId} extras=${extraIds.size()}", null)
+                            observed++
+                            continue
+                        }
+                        if (now.time - (prior.firstSeenDate as java.sql.Timestamp).time < 120000L) {
+                            ec.service.sync().name('update#AuthorizeDotNet.HostedDuplicateCharge').parameters([orderId:orderId, transId:tid, lastSeenDate:now]).call()
+                            observed++
+                            continue
+                        }
+                        def extra = details(tid)
+                        if (!extra.good) { observed++; continue }
+                        if (mode != 'live') {
+                            ec.service.sync().name('update#AuthorizeDotNet.HostedDuplicateCharge').parameters([orderId:orderId, transId:tid,
+                                    lastSeenDate:now, disposition:'DryRun', amount:extra.amount]).call()
+                            ec.logger.log('warn', "HOSTED_DUPLICATE_CHARGE_DRY_RUN order=${orderId}", null)
+                            dry++
+                            continue
+                        }
+                        boolean settled = extra.status == 'settledSuccessfully'
+                        String reversal
+                        if (!settled) {
+                            reversal = """<?xml version="1.0" encoding="utf-8"?>
+<createTransactionRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">${auth}<transactionRequest><transactionType>voidTransaction</transactionType><refTransId>${encodeForXmlAttribute(tid)}</refTransId></transactionRequest></createTransactionRequest>"""
+                        } else if (extra.last4) {
+                            reversal = """<?xml version="1.0" encoding="utf-8"?>
+<createTransactionRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">${auth}<transactionRequest><transactionType>refundTransaction</transactionType><amount>${extra.amount.toPlainString()}</amount><payment><creditCard><cardNumber>${encodeForXmlAttribute(extra.last4)}</cardNumber><expirationDate>XXXX</expirationDate></creditCard></payment><refTransId>${encodeForXmlAttribute(tid)}</refTransId></transactionRequest></createTransactionRequest>"""
+                        } else { reversal = null }
+                        String result = 'gateway-error'
+                        if (reversal != null) {
+                            def reply = post(reversal)
+                            def okReply = 'Ok'.equalsIgnoreCase(reply.messages?.resultCode?.text() ?: '')
+                            result = okReply && reply.transactionResponse?.responseCode?.text() == '1' ? 'approved' : (okReply ? 'declined' : 'gateway-error')
+                        }
+                        if (result == 'approved') {
+                            ec.service.sync().name('update#AuthorizeDotNet.HostedDuplicateCharge').parameters([orderId:orderId, transId:tid, lastSeenDate:now,
+                                    disposition:(settled ? 'Refunded' : 'Voided'), actionDate:now, actionResult:result, amount:extra.amount]).call()
+                            ec.logger.log('warn', "HOSTED_DUPLICATE_CHARGE_REVERSED order=${orderId} kind=${settled ? 'refund' : 'void'}", null)
+                            acted++
+                        } else {
+                            ec.service.sync().name('update#AuthorizeDotNet.HostedDuplicateCharge').parameters([orderId:orderId, transId:tid, lastSeenDate:now,
+                                    disposition:'Failed', actionDate:now, actionResult:result, amount:extra.amount]).call()
+                            ec.logger.log('error', "HOSTED_DUPLICATE_CHARGE_ACTION_FAILED order=${orderId} result=${result}", null)
+                        }
+                    }
+                    actedCount = acted
+                    disposition = acted ? 'acted' : (dry ? 'dry-run' : (observed ? 'observed' : 'waiting'))
+                }
             ]]></script>
         </actions>
     </service>

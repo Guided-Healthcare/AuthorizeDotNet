@@ -56,6 +56,7 @@ class InstrumentFind {
     def condition(Map context){
         def primaryKeys=[
             'AuthorizeDotNet.PaymentGatewayAuthorizeNet':['paymentGatewayConfigId'],
+            'AuthorizeDotNet.HostedDuplicateCharge':['orderId','transId'],
             'mantle.order.OrderHeader':['orderId'], 'mantle.order.OrderPart':['orderId','orderPartSeqId'],
             'mantle.account.payment.Payment':['paymentId'], 'mantle.account.method.PaymentMethod':['paymentMethodId']]
         (primaryKeys[entity]?:[]).each{keys[it]=context[it]};this
@@ -96,7 +97,7 @@ class InstrumentFixture {
                 makeActionConditionDirect:{String field,String operator,Object from,String value,String to,boolean ignoreCase,boolean ignoreIfEmpty,boolean orNull,String ignore->
                     assert !to&&!ignoreCase&&!orNull&&ignore=='false'
                     if(ignoreIfEmpty&&!from&&!value)return null
-                    factory.makeCondition(field,factory.getComparisonOperator(operator),value?:from)
+                    factory.makeCondition(field,factory.getComparisonOperator(operator),(operator in ['in','not-in']&&value)?value.split(',').toList():(value?:from))
                 }]],
             service:[sync:{->new InstrumentCall(f:this)}],
             message:[hasError:{->!errors.empty},addError:{String message->errors<<message}],
@@ -147,6 +148,10 @@ class InstrumentFixture {
             case 'AuthorizeDotNet.HostedServices.inspect#HostedInvoiceActivity':return run(HOSTED,'inspect','HostedInvoiceActivity',input)
             case 'mantle.account.PaymentServices.create#Payment':return run(MANTLE,'create','Payment',input)
             case 'mantle.account.PaymentServices.set#PaymentAutoInfo':return run(MANTLE,'set','PaymentAutoInfo',input)
+            case 'create#AuthorizeDotNet.HostedDuplicateCharge':
+                (tables['AuthorizeDotNet.HostedDuplicateCharge']=tables['AuthorizeDotNet.HostedDuplicateCharge']?:[])<<new LinkedHashMap(input);return [:]
+            case 'update#AuthorizeDotNet.HostedDuplicateCharge':
+                tables['AuthorizeDotNet.HostedDuplicateCharge'].find{it.orderId==input.orderId&&it.transId==input.transId}.putAll(input);return [:]
             case 'create#mantle.account.payment.Payment':
                 assert events.contains('lock:mantle.order.OrderHeader')
                 Map row=input.findAll{k,v->k in ['orderId','orderPartSeqId','paymentTypeEnumId','statusId','paymentInstrumentEnumId','paymentMethodId','amount','amountUomId','fromPartyId','toPartyId','paymentRefNum','effectiveDate','paymentGatewayConfigId']}

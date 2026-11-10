@@ -48,4 +48,19 @@ along with this software (see the LICENSE.md file). If not, see
             <moqui.basic.Enumeration description="Authorize.Net Gateway" enumId="PgtAuthorizeDotNet" enumTypeId="PaymentGatewayType"/>
         </seed-data>
     </entity>
+    <!-- GH-171: audit trail and two-scan agreement for reversing a SECOND successful charge on one order.
+         One row per extra gateway transaction; no card data, no gateway response bodies. -->
+    <entity entity-name="HostedDuplicateCharge" package="AuthorizeDotNet" cache="never">
+        <field name="orderId" type="id" is-pk="true"/>
+        <field name="transId" type="id" is-pk="true"/>
+        <field name="keeperTransId" type="id"/>
+        <field name="firstSeenDate" type="date-time" not-null="true"/>
+        <field name="lastSeenDate" type="date-time"/>
+        <!-- Observed | DryRun | Voided | Refunded | Failed -->
+        <field name="disposition" type="text-short"/>
+        <field name="actionDate" type="date-time"/>
+        <!-- Fixed vocabulary: approved | declined | gateway-error -->
+        <field name="actionResult" type="text-short"/>
+        <field name="amount" type="currency-amount"/>
+    </entity>
 </entities>

@@ -97,4 +97,14 @@ check('confirm: a client transId on a later attempt invoice is accepted'){
  def f=fixture([detailsFor:['5':[status:'settledSuccessfully',invoice:'synthetic-order-2',type:'authCaptureTransaction',code:'1',amount:'75.00']]])
  def r=confirm(f,[transId:'5']);assert r.authorized
 }
+check('inspect settledWindowDays narrows the settled batch search and is capped at 30'){
+ [[3,3],[1,1],[500,30],[0,30]].each{days,expected->
+  def f=fixture([:]);def seen=[]
+  f.metaClass.transport={String url,String body->def req=new groovy.xml.XmlParser().parseText(body)
+   if(req.name().toString().endsWith('getSettledBatchListRequest')){
+    def a=java.time.Instant.parse(req.firstSettlementDate.text());def b=java.time.Instant.parse(req.lastSettlementDate.text());seen<<java.time.Duration.between(a,b).toDays()}
+   req.name().toString().endsWith('getSettledBatchListRequest')?'<response><messages><resultCode>Ok</resultCode></messages><batchList></batchList></response>':'<response><messages><resultCode>Ok</resultCode></messages><totalNumInResultSet>0</totalNumInResultSet><transactions></transactions></response>'}
+  def r=inspect(f,[settledWindowDays:days]);assert r.scanComplete;assert seen==[expected]:"${days}->${seen}"
+ }
+}
 println "Hosted invoice activity: ${passed} passed, ${failures.size()} failed";assert failures.empty:failures
